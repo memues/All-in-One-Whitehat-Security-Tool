@@ -31,6 +31,23 @@ dotnet publish -c Release -r win-x64 --self-contained
 
 The published binary lives at `bin\Release\net8.0-windows\win-x64\publish\WhitehatSecurity.exe`.
 
+## Install / Uninstall
+
+The `.exe` is its own installer. Just download `WhitehatSecurity.exe` from the latest release and double-click it:
+
+- **First run from outside Program Files**: a small dialog asks whether you want to install system-wide. Yes → triggers UAC, copies the `.exe` to `C:\Program Files\Whitehat Security\`, registers in Windows **Apps & Features**, creates Start Menu and Public Desktop shortcuts. No → just runs the current copy once.
+- **Uninstall**: open *Settings → Apps → Apps & Features*, find **Whitehat Security**, click *Uninstall*. Or run `WhitehatSecurity.exe --uninstall` from a terminal.
+
+CLI flags:
+
+| Flag | Effect |
+|------|--------|
+| (none) | Tray icon + dashboard |
+| `--silent` | Tray icon only, no dashboard auto-open, no install prompt |
+| `--install` | Copy self to Program Files, register in Add/Remove Programs (must be run elevated; UAC is requested automatically when triggered from the first-run dialog) |
+| `--uninstall` | Remove install dir, shortcuts, registry entry (run elevated) |
+| `--quiet` | Suppress success/error message boxes during install/uninstall |
+
 ## Layout
 
 ```

@@ -22,25 +22,31 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly Logger           _logger;
     private readonly MonitorHost      _host;
     private readonly DashboardSink    _dashboardSink;
+    private readonly ConsoleSink      _consoleSink;
+    private readonly string           _configPath;
     private DashboardForm?            _dashboard;
 
     public TrayApplicationContext(
         NotifyConfig config,
         Logger       logger,
-        MonitorHost  host)
+        MonitorHost  host,
+        ConsoleSink  consoleSink,
+        string       configPath)
     {
-        _config = config;
-        _logger = logger;
-        _host   = host;
+        _config      = config;
+        _logger      = logger;
+        _host        = host;
+        _consoleSink = consoleSink;
+        _configPath  = configPath;
 
         _tray = new NotifyIcon
         {
-            Icon            = BuildShieldIcon(),
-            Text            = "Whitehat Security",
-            Visible         = true,
+            Icon             = BuildShieldIcon(),
+            Text             = "Whitehat Security",
+            Visible          = true,
             ContextMenuStrip = BuildContextMenu(),
         };
-        _tray.DoubleClick += (_, _) => OpenDashboard();
+        _tray.DoubleClick       += (_, _) => OpenDashboard();
         _tray.BalloonTipClicked += (_, _) => OpenDashboard();
 
         // Sink that forwards alerts into the dashboard's listview when it
@@ -48,6 +54,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         // user opens the dashboard.
         _dashboardSink = new DashboardSink();
         host.AddSink(_dashboardSink);
+        host.AddSink(_consoleSink);
         host.AddSink(new ToastNotifier(_tray, _config));
 
         host.Start();
@@ -86,23 +93,28 @@ public sealed class TrayApplicationContext : ApplicationContext
         return Path.GetFileNameWithoutExtension(exe);
     }
 
-    public void OpenDashboard()
+    public void OpenDashboard(string? tab = null)
     {
         if (_dashboard is null || _dashboard.IsDisposed)
         {
-            _dashboard = new DashboardForm(_config, _logger, _dashboardSink);
+            _dashboard = new DashboardForm(_config, _logger, _dashboardSink, _consoleSink, _configPath);
             _dashboard.FormClosed += (_, _) => _dashboard = null;
         }
         _dashboard.Show();
         _dashboard.WindowState = FormWindowState.Normal;
         _dashboard.BringToFront();
         _dashboard.Activate();
+        if (tab is not null) _dashboard.OpenTab(tab);
     }
 
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Dashboard", null, (_, _) => OpenDashboard());
+        menu.Items.Add("Alerts",         null, (_, _) => OpenDashboard("Alerts"));
+        menu.Items.Add("Settings",       null, (_, _) => OpenDashboard("Settings"));
+        menu.Items.Add("Logs",           null, (_, _) => OpenDashboard("Logs"));
+        menu.Items.Add("Console",        null, (_, _) => OpenDashboard("Console"));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) =>
         {

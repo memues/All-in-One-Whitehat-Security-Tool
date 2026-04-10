@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: MIT
+// Self-installer / self-uninstaller. The single .exe is its own setup
+// program: when launched from outside Program Files it offers to install
+// itself system-wide, when launched with --uninstall it cleans up.
+//
+// Install location: %ProgramFiles%\Whitehat Security\WhitehatSecurity.exe
+// Add/Remove key:   HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\WhitehatSecurity
+// Start menu link:  %ProgramData%\Microsoft\Windows\Start Menu\Programs\Whitehat Security.lnk
+// Desktop link:     %PUBLIC%\Desktop\Whitehat Security.lnk
+//
+// All file copies and registry writes happen elevated. Self-deletion of the
+// installed binary during uninstall uses the classic "spawn cmd that waits
+// then deletes the file" trick because Windows will not let a running .exe
+// remove itself.
+
+using System;
+using System.Diagnostics;
+using System.IO;
+using Microsoft.Win32;
+
+namespace WhitehatSecurity.Core;
+
+public static class Installer
+{
+    public const string ProductName    = "Whitehat Security";
+    public const string ProductVersion = "7.2.0";
+    public const string Publisher      = "Whitehat Security";
+    public const string AppId          = "WhitehatSecurity";
+
+    public const string UninstallKeyPath =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\WhitehatSecurity";
+
+    public static string DefaultInstallDir =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            ProductName);
+
+    public static string DefaultInstallExePath =>
+        Path.Combine(DefaultInstallDir, "WhitehatSecurity.exe");
+
+    public static string StartMenuShortcut =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
+            "Programs",
+            ProductName + ".lnk");
+
+    public static string PublicDesktopShortcut =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
+            ProductName + ".lnk");
+
+    /// <summary>
+    /// Returns true when the running .exe lives inside the canonical install
+    /// directory. The first-run flow uses this to decide whether to show the
+    /// install prompt.
+    /// </summary>
+    public static bool IsRunningFromInstallDir()
+    {
+        var current = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(current)) return false;
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(current),
+                Path.GetFullPath(DefaultInstallExePath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    public static bool IsAlreadyInstalled()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(UninstallKeyPath);
+            return key is not null;
+        }
+        catch { return false; }
+    }
+
+    // ========================================================================
+    //  INSTALL
+    // ========================================================================
+
+    /// <summary>
+    /// Copies the running .exe to %ProgramFiles%\Whitehat Security\,
+    /// registers in Add/Remove Programs, and creates Start Menu and Public
+    /// Desktop shortcuts. Must be called from an elevated process.
+    /// </summary>
+    public static void InstallElevated(Logger? logger = null)
+    {
+        var src = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Cannot determine current exe path");
+        var dstDir = DefaultInstallDir;
+        var dstExe = DefaultInstallExePath;
+
+        Directory.CreateDirectory(dstDir);
+
+        // Copy the binary. We use a temp name then rename so a partial copy
+        // never leaves a half-written .exe at the canonical path.
+        var tmp = dstExe + ".new";
+        File.Copy(src, tmp, overwrite: true);
+        if (File.Exists(dstExe))
+        {
+            try { File.Delete(dstExe); } catch { }
+        }
+        File.Move(tmp, dstExe);
+        logger?.Info($"Installed binary to {dstExe}");
+
+        // Register in Add/Remove Programs
+        WriteUninstallKey(dstExe, dstDir);
+        logger?.Info("Registered in Add/Remove Programs");
+
+        // Shortcuts
+        try { CreateShortcut(StartMenuShortcut,    dstExe); } catch (Exception ex) { logger?.Warn($"Start menu shortcut: {ex.Message}"); }
+        try { CreateShortcut(PublicDesktopShortcut, dstExe); } catch (Exception ex) { logger?.Warn($"Desktop shortcut: {ex.Message}"); }
+    }
+
+    private static void WriteUninstallKey(string installedExe, string installDir)
+    {
+        using var key = Registry.LocalMachine.CreateSubKey(UninstallKeyPath, writable: true);
+        if (key is null) throw new InvalidOperationException("Cannot create uninstall key");
+
+        long sizeKb = 0;
+        try { sizeKb = new FileInfo(installedExe).Length / 1024; } catch { }
+
+        key.SetValue("DisplayName",     ProductName);
+        key.SetValue("DisplayVersion",  ProductVersion);
+        key.SetValue("Publisher",       Publisher);
+        key.SetValue("DisplayIcon",     installedExe);
+        key.SetValue("InstallLocation", installDir);
+        key.SetValue("UninstallString", $"\"{installedExe}\" --uninstall");
+        key.SetValue("QuietUninstallString", $"\"{installedExe}\" --uninstall --quiet");
+        key.SetValue("InstallDate",     DateTime.Now.ToString("yyyyMMdd"));
+        key.SetValue("EstimatedSize",   (int)sizeKb, RegistryValueKind.DWord);
+        key.SetValue("NoModify",        1, RegistryValueKind.DWord);
+        key.SetValue("NoRepair",        1, RegistryValueKind.DWord);
+        key.SetValue("URLInfoAbout",    "https://github.com/xyzwebmaster/All-in-One-Whitehat-Security-Tool");
+    }
+
+    private static void CreateShortcut(string lnkPath, string targetExe)
+    {
+        // Use the WScript.Shell COM object via reflection so we don't pull in
+        // an extra package reference (Interop.Shell32 etc.). Same approach
+        // the PowerShell port uses internally.
+        var dir = Path.GetDirectoryName(lnkPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var t = Type.GetTypeFromProgID("WScript.Shell");
+        if (t is null) throw new InvalidOperationException("WScript.Shell not registered");
+        dynamic? shell = Activator.CreateInstance(t);
+        if (shell is null) throw new InvalidOperationException("WScript.Shell instance is null");
+        try
+        {
+            dynamic sc = shell.CreateShortcut(lnkPath);
+            sc.TargetPath       = targetExe;
+            sc.WorkingDirectory = Path.GetDirectoryName(targetExe) ?? "";
+            sc.IconLocation     = targetExe + ",0";
+            sc.Description      = ProductName;
+            sc.Save();
+        }
+        finally
+        {
+            try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); } catch { }
+        }
+    }
+
+    // ========================================================================
+    //  UNINSTALL
+    // ========================================================================
+
+    /// <summary>
+    /// Removes the installed copy, registry entry, and shortcuts. Must be
+    /// called from an elevated process. Schedules a self-delete batch script
+    /// because the running .exe (which lives at the install path) cannot
+    /// delete itself.
+    /// </summary>
+    public static void UninstallElevated(Logger? logger = null)
+    {
+        // Best-effort: delete the registry entry first so the entry vanishes
+        // from Apps & Features even if file removal fails for any reason.
+        try
+        {
+            Registry.LocalMachine.DeleteSubKeyTree(UninstallKeyPath, throwOnMissingSubKey: false);
+            logger?.Info("Removed Add/Remove Programs entry");
+        }
+        catch (Exception ex) { logger?.Warn($"Registry delete: {ex.Message}"); }
+
+        // Shortcuts
+        TryDelete(StartMenuShortcut,     logger);
+        TryDelete(PublicDesktopShortcut, logger);
+
+        var installedExe = DefaultInstallExePath;
+        var installDir   = DefaultInstallDir;
+
+        // If we're not the installed exe, just delete the install dir directly
+        var current = Environment.ProcessPath ?? "";
+        bool selfIsInstalled = string.Equals(
+            Path.GetFullPath(current),
+            Path.GetFullPath(installedExe),
+            StringComparison.OrdinalIgnoreCase);
+
+        if (!selfIsInstalled)
+        {
+            try
+            {
+                if (Directory.Exists(installDir))
+                {
+                    Directory.Delete(installDir, recursive: true);
+                    logger?.Info($"Removed {installDir}");
+                }
+            }
+            catch (Exception ex) { logger?.Warn($"Install dir delete: {ex.Message}"); }
+            return;
+        }
+
+        // We ARE the installed exe. We can't delete ourselves, so spawn a
+        // detached cmd.exe that waits 2 seconds then deletes the install dir
+        // and itself.
+        var batPath = Path.Combine(Path.GetTempPath(), $"whs_uninst_{Guid.NewGuid():N}.bat");
+        File.WriteAllText(batPath, BuildSelfDeleteBatch(installDir, batPath));
+        logger?.Info("Scheduled self-delete; exiting");
+
+        var psi = new ProcessStartInfo
+        {
+            FileName        = "cmd.exe",
+            Arguments       = $"/c \"{batPath}\"",
+            UseShellExecute = false,
+            CreateNoWindow  = true,
+            WindowStyle     = ProcessWindowStyle.Hidden,
+        };
+        Process.Start(psi);
+        // The caller (Program.Main) returns immediately after this and the
+        // process exits, freeing the file lock so the batch can delete us.
+    }
+
+    private static string BuildSelfDeleteBatch(string installDir, string batPath) => $@"
+@echo off
+ping 127.0.0.1 -n 3 > nul
+rmdir /s /q ""{installDir}""
+del ""{batPath}""
+";
+
+    private static void TryDelete(string path, Logger? logger)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                logger?.Info($"Removed {path}");
+            }
+        }
+        catch (Exception ex) { logger?.Warn($"Delete {path}: {ex.Message}"); }
+    }
+}

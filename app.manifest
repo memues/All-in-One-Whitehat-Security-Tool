@@ -1,14 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="7.1.0.0" name="WhitehatSecurity" />
+  <assemblyIdentity version="7.2.0.0" name="WhitehatSecurity" />
 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- highestAvailable: do not require admin, but use it if granted.
-             Many engines (driver enumeration, registry tampering checks) work
-             best as admin, but the dashboard is usable without elevation. -->
-        <requestedExecutionLevel level="highestAvailable" uiAccess="false" />
+        <!-- asInvoker: the .exe runs unprivileged for normal use. The
+             install / uninstall flows spawn an elevated copy of themselves
+             via Process.Start with Verb=runas, which triggers UAC at the
+             right moment instead of on every launch. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

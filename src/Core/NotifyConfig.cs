@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-// JSON-backed notification preferences. Mirrors notification_config.json
-// produced by SecurityMonitor.ps1.
+// JSON-backed preferences. Mirrors notification_config.json from the legacy
+// PowerShell port (SecurityMonitor.ps1, lines ~22-200, plus the firewall and
+// DNS sections at lines ~3563-4500). Same field names so config files written
+// by either implementation are interchangeable.
 
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -11,23 +12,21 @@ using System.Text.Json.Serialization;
 namespace WhitehatSecurity.Core;
 
 /// <summary>
-/// Per-category notification toggles plus a few global flags. Round-trips
-/// to/from notification_config.json with the same field names as the
-/// PowerShell version so the C# port and the PS port can share a config file
-/// when they live next to each other.
+/// All 27 settings the dashboard exposes. Field names match the JSON keys
+/// used by the PowerShell port one-for-one so users can carry their existing
+/// configuration over.
 /// </summary>
 public sealed class NotifyConfig
 {
-    // Notification categories ------------------------------------------------
+    // ---------------- Notification categories (10) ----------------
 
     [JsonPropertyName("Firmware")]   public bool Firmware   { get; set; }
     [JsonPropertyName("Driver")]     public bool Driver     { get; set; }
     [JsonPropertyName("Service")]    public bool Service    { get; set; }
     /// <summary>
-    /// "Unknown Network Connections". Opt-in by default — this is the
-    /// noisiest category and a single browser session generates dozens of
-    /// alerts. Matches the PowerShell behavior change in Edit 1 of the
-    /// hidden-juggling-puffin plan.
+    /// "Unknown Network Connections". Opt-in by default — easily the noisiest
+    /// category. Same default as the PS port after the hidden-juggling-puffin
+    /// plan landed.
     /// </summary>
     [JsonPropertyName("Connection")] public bool Connection { get; set; }
     [JsonPropertyName("Process")]    public bool Process    { get; set; }
@@ -37,7 +36,7 @@ public sealed class NotifyConfig
     [JsonPropertyName("RDP")]        public bool RDP        { get; set; }
     [JsonPropertyName("Hosts")]      public bool Hosts      { get; set; }
 
-    // Global toggles ---------------------------------------------------------
+    // ---------------- Display / behavior (3) ----------------
 
     [JsonPropertyName("ShowThreatDetails")]
     public bool ShowThreatDetails { get; set; }
@@ -45,10 +44,44 @@ public sealed class NotifyConfig
     [JsonPropertyName("EnableToastNotifications")]
     public bool EnableToastNotifications { get; set; }
 
-    /// <summary>
-    /// Build the same default config that SecurityMonitor.ps1 writes on first
-    /// run, with Connection = false (opt-in).
-    /// </summary>
+    /// <summary>System beeps on alert (3 for CRIT, 2 for HIGH, 1 for MED).</summary>
+    [JsonPropertyName("BeepOnAlert")]
+    public bool BeepOnAlert { get; set; }
+
+    // ---------------- Firewall profiles (3) ----------------
+
+    [JsonPropertyName("FW_DomainProfile")]  public bool FW_DomainProfile  { get; set; } = true;
+    [JsonPropertyName("FW_PrivateProfile")] public bool FW_PrivateProfile { get; set; } = true;
+    [JsonPropertyName("FW_PublicProfile")]  public bool FW_PublicProfile  { get; set; } = true;
+
+    // ---------------- Firewall block rules (5) ----------------
+
+    [JsonPropertyName("FW_BlockInbound")]  public bool FW_BlockInbound  { get; set; }
+    [JsonPropertyName("FW_BlockOutbound")] public bool FW_BlockOutbound { get; set; }
+    [JsonPropertyName("FW_BlockPing")]     public bool FW_BlockPing     { get; set; }
+    [JsonPropertyName("FW_BlockLAN")]      public bool FW_BlockLAN      { get; set; }
+    [JsonPropertyName("FW_BlockDevices")]  public bool FW_BlockDevices  { get; set; }
+
+    // ---------------- Host-based protection (4) ----------------
+
+    [JsonPropertyName("PF_BlockTrackers")]  public bool PF_BlockTrackers  { get; set; }
+    [JsonPropertyName("PF_BlockMalware")]   public bool PF_BlockMalware   { get; set; }
+    [JsonPropertyName("PF_BlockTelemetry")] public bool PF_BlockTelemetry { get; set; }
+    [JsonPropertyName("PF_BlockDNSBypass")] public bool PF_BlockDNSBypass { get; set; }
+
+    // ---------------- DNS (2) ----------------
+
+    /// <summary>One of: "None", "Cloudflare", "Quad9", "Google", "OpenDNS", "AdGuard".</summary>
+    [JsonPropertyName("DNS_Provider")]
+    public string DNS_Provider { get; set; } = "None";
+
+    [JsonPropertyName("DNS_DoH")]
+    public bool DNS_DoH { get; set; }
+
+    // ============================================================================
+    // Defaults / lookup helpers
+    // ============================================================================
+
     public static NotifyConfig Defaults() => new()
     {
         Firmware                 = true,
@@ -63,46 +96,53 @@ public sealed class NotifyConfig
         Hosts                    = true,
         ShowThreatDetails        = false,
         EnableToastNotifications = true,
+        BeepOnAlert              = false,
+        FW_DomainProfile         = true,
+        FW_PrivateProfile        = true,
+        FW_PublicProfile         = true,
+        FW_BlockInbound          = false,
+        FW_BlockOutbound         = false,
+        FW_BlockPing             = false,
+        FW_BlockLAN              = false,
+        FW_BlockDevices          = false,
+        PF_BlockTrackers         = false,
+        PF_BlockMalware          = false,
+        PF_BlockTelemetry        = false,
+        PF_BlockDNSBypass        = false,
+        DNS_Provider             = "None",
+        DNS_DoH                  = false,
     };
 
     /// <summary>
-    /// Look up a category by its PowerShell key name. Returns the same
-    /// "missing → default" value Test-NotifyEnabled returns in the PS port:
-    /// false for "Connection", true for everything else.
+    /// Look up a notification category by its PowerShell key name. Returns
+    /// the same "missing → default" value Test-NotifyEnabled returns in the
+    /// PS port: false for "Connection", true for everything else.
     /// </summary>
-    public bool IsCategoryEnabled(string category)
+    public bool IsCategoryEnabled(string category) => category switch
     {
-        return category switch
-        {
-            "Firmware"   => Firmware,
-            "Driver"     => Driver,
-            "Service"    => Service,
-            "Connection" => Connection,
-            "Process"    => Process,
-            "Listener"   => Listener,
-            "Registry"   => Registry,
-            "Security"   => Security,
-            "RDP"        => RDP,
-            "Hosts"      => Hosts,
-            _            => true,   // unknown categories default ON, except…
-        };
-    }
+        "Firmware"   => Firmware,
+        "Driver"     => Driver,
+        "Service"    => Service,
+        "Connection" => Connection,
+        "Process"    => Process,
+        "Listener"   => Listener,
+        "Registry"   => Registry,
+        "Security"   => Security,
+        "RDP"        => RDP,
+        "Hosts"      => Hosts,
+        _            => true,
+    };
 
-    /// <summary>
-    /// The default value to use for a category when its key is missing from
-    /// the JSON file. Mirrors the per-key fallback in Edit 4 of the
-    /// hidden-juggling-puffin plan.
-    /// </summary>
     public static bool DefaultForCategory(string category)
         => category != "Connection";
 
-    // ------------------------------------------------------------------------
+    // ============================================================================
     // Persistence
-    // ------------------------------------------------------------------------
+    // ============================================================================
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
-        WriteIndented        = true,
+        WriteIndented          = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.Never,
     };
 
