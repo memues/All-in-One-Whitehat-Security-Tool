@@ -93,44 +93,98 @@ public sealed partial class DashboardForm : Form
             _consoleSink.LineAppended -= OnConsoleLineAppended;
         };
 
-        // Periodic refresher for the Status page (uptime + counts + posture)
+        // Periodic refresher for the Status page. Two separate cadences:
+        //
+        //   * uptime + counts on every 2 s tick (cheap, all in-process)
+        //   * posture WMI queries on a background Task every 5th tick
+        //     (~10 s) so the eight WMI calls never block the UI thread.
+        //
+        // The first posture refresh kicks off ~500 ms after the dashboard
+        // appears (still on a background thread) so the dots populate
+        // shortly after open without blocking the form constructor.
         var statusTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        int postureTickCounter = 0;
         statusTimer.Tick += (_, _) =>
         {
             RefreshStatusPage();
-            RefreshPostureIndicators();
+            postureTickCounter++;
+            if (postureTickCounter % 5 == 0)
+                BeginRefreshPostureIndicators();
         };
         statusTimer.Start();
 
-        // Run one immediate posture refresh so the dots are correct before
-        // the first 2 s tick fires.
-        try { RefreshPostureIndicators(); } catch { }
+        // First posture refresh — fires after ~500 ms on a background
+        // thread so the dashboard appears immediately and the dots populate
+        // on next paint instead of blocking the form constructor on 8 WMI
+        // queries (each ~200-500 ms = ~3-4 s of total UI freeze in v7.3.0).
+        var firstPostureKick = new System.Windows.Forms.Timer { Interval = 500 };
+        firstPostureKick.Tick += (_, _) =>
+        {
+            firstPostureKick.Stop();
+            firstPostureKick.Dispose();
+            BeginRefreshPostureIndicators();
+        };
+        firstPostureKick.Start();
 
         FormClosed += (_, _) => statusTimer.Stop();
     }
 
     /// <summary>
-    /// Walks the eight posture indicators and updates their dot color from
-    /// the live system state. Runs every 2 s on the form's UI timer.
+    /// Posture is being refreshed by a background Task — used to coalesce
+    /// concurrent timer ticks so we never have two WMI scans racing.
     /// </summary>
-    private void RefreshPostureIndicators()
+    private int _postureRefreshing = 0;
+
+    /// <summary>
+    /// Kicks off the eight posture queries on a background Task and posts
+    /// the results back via BeginInvoke. Idempotent — concurrent calls
+    /// while a refresh is in flight are no-ops.
+    /// </summary>
+    private void BeginRefreshPostureIndicators()
     {
         if (IsDisposed) return;
-        try
+        if (System.Threading.Interlocked.CompareExchange(ref _postureRefreshing, 1, 0) != 0)
+            return;
+
+        System.Threading.Tasks.Task.Run(() =>
         {
-            SetPosture("Defender",   SecurityPosture.Defender());
-            SetPosture("Firewall",   SecurityPosture.Firewall());
-            SetPosture("UAC",        SecurityPosture.UAC());
-            SetPosture("RDP",        SecurityPosture.RdpOff());
-            SetPosture("SecureBoot", SecurityPosture.SecureBoot());
-            SetPosture("TPM",        SecurityPosture.Tpm());
-            SetPosture("HVCI",       SecurityPosture.Hvci());
-            SetPosture("BitLocker",  SecurityPosture.BitLocker());
-        }
-        catch
-        {
-            // posture refresh failures are cosmetic — never let them crash the UI
-        }
+            // Run the eight queries on the background thread. Each one is
+            // already wrapped in try/catch inside SecurityPosture, so we
+            // never propagate.
+            var snapshot = new (string Key, PostureState State)[]
+            {
+                ("Defender",   SecurityPosture.Defender()),
+                ("Firewall",   SecurityPosture.Firewall()),
+                ("UAC",        SecurityPosture.UAC()),
+                ("RDP",        SecurityPosture.RdpOff()),
+                ("SecureBoot", SecurityPosture.SecureBoot()),
+                ("TPM",        SecurityPosture.Tpm()),
+                ("HVCI",       SecurityPosture.Hvci()),
+                ("BitLocker",  SecurityPosture.BitLocker()),
+            };
+
+            // Marshal back to the UI thread to update the labels.
+            try
+            {
+                if (!IsDisposed)
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (IsDisposed) return;
+                        foreach (var (key, state) in snapshot)
+                            SetPosture(key, state);
+                    }));
+                }
+            }
+            catch
+            {
+                // form closing — drop on the floor
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _postureRefreshing, 0);
+            }
+        });
     }
 
     private void SetPosture(string key, PostureState state)
@@ -712,17 +766,60 @@ public sealed partial class DashboardForm : Form
     //  Status page refresh
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// Cached process count, refreshed every ~6 s by RefreshStatusPage.
+    /// Process.GetProcesses() allocates a Process object per kernel handle
+    /// (~500 objects on a typical desktop) and cannot be made cheap, so we
+    /// throttle it independently from the rest of the cards.
+    /// </summary>
+    private int _cachedProcessCount = 0;
+    private long _lastProcessCountTick = 0;
+
+    /// <summary>
+    /// Same throttle for the active TCP connection count — IPGlobalProperties
+    /// pivots through GetTcpTable which can be slow when the system has
+    /// thousands of half-closed sockets.
+    /// </summary>
+    private int _cachedConnCount = 0;
+    private long _lastConnCountTick = 0;
+
     private void RefreshStatusPage()
     {
         try
         {
             _alertCountValue.Text = _sink.All.Count.ToString();
-            _connCountValue.Text  = System.Net.NetworkInformation.IPGlobalProperties
-                .GetIPGlobalProperties()
-                .GetActiveTcpConnections().Length.ToString();
-            _procCountValue.Text  = Process.GetProcesses().Length.ToString();
+
+            // Only re-query the heavy counters every ~6 s. The 2 s timer
+            // tick still updates uptime + alert count cheaply.
+            long now = Environment.TickCount64;
+            if (now - _lastConnCountTick > 6000)
+            {
+                try
+                {
+                    _cachedConnCount = System.Net.NetworkInformation.IPGlobalProperties
+                        .GetIPGlobalProperties()
+                        .GetActiveTcpConnections().Length;
+                }
+                catch { /* leave previous value */ }
+                _lastConnCountTick = now;
+            }
+            _connCountValue.Text = _cachedConnCount.ToString();
+
+            if (now - _lastProcessCountTick > 6000)
+            {
+                try
+                {
+                    var ps = Process.GetProcesses();
+                    _cachedProcessCount = ps.Length;
+                    foreach (var p in ps) p.Dispose();   // release the handles
+                }
+                catch { /* leave previous value */ }
+                _lastProcessCountTick = now;
+            }
+            _procCountValue.Text = _cachedProcessCount.ToString();
+
             var up = TimeSpan.FromMilliseconds(Environment.TickCount64);
-            _uptimeValue.Text     = $"{(int)up.TotalHours:D2}:{up.Minutes:D2}";
+            _uptimeValue.Text = $"{(int)up.TotalHours:D2}:{up.Minutes:D2}";
         }
         catch
         {

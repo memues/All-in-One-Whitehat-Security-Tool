@@ -23,7 +23,7 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.3.0";
+    public const string ProductVersion = "7.3.1";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
 
@@ -237,6 +237,39 @@ public static class Installer
     /// </summary>
     public static void UninstallElevated(Logger? logger = null)
     {
+        // Step 0 — kill every running WhitehatSecurity.exe instance EXCEPT
+        // ourselves (the uninstaller). The auto-start tray instance has the
+        // installed .exe open, so File.Delete would fail without this. We
+        // skip the current process so we can finish the uninstall script
+        // and schedule our own self-delete.
+        try
+        {
+            int self = Environment.ProcessId;
+            var others = Process.GetProcessesByName("WhitehatSecurity");
+            foreach (var p in others)
+            {
+                try
+                {
+                    if (p.Id == self) { p.Dispose(); continue; }
+                    logger?.Info($"Stopping running instance PID {p.Id}");
+                    p.Kill(entireProcessTree: false);
+                    p.WaitForExit(3000);
+                }
+                catch (Exception ex)
+                {
+                    logger?.Warn($"Could not stop PID {p.Id}: {ex.Message}");
+                }
+                finally
+                {
+                    try { p.Dispose(); } catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.Warn($"Process enumeration failed: {ex.Message}");
+        }
+
         // Best-effort: delete the registry entry first so the entry vanishes
         // from Apps & Features even if file removal fails for any reason.
         try
