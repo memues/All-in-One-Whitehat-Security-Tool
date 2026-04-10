@@ -1,3 +1,15 @@
+# Build output
+bin/
+obj/
+publish/
+
+# Visual Studio / Rider workspace
+.vs/
+*.user
+*.suo
+*.swp
+
+# Runtime artifacts that the program writes next to the .exe
 Logs/
 Baselines/
 notification_config.json
