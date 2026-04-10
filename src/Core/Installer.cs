@@ -23,7 +23,7 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.3.2";
+    public const string ProductVersion = "7.3.3";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
 
@@ -295,6 +295,21 @@ public static class Installer
         TryDelete(StartMenuShortcut,     logger);
         TryDelete(PublicDesktopShortcut, logger);
         TryDelete(UserDesktopShortcut,   logger);
+
+        // Per-user data dir under %LOCALAPPDATA% — config, logs, baselines.
+        // v7.3.x left this behind on uninstall, which meant a reinstall
+        // picked up the previous user's settings (notably toast on/off,
+        // notification category state). Removing it makes a reinstall
+        // start from a true fresh state with the v7.3.2+ defaults.
+        try
+        {
+            if (Directory.Exists(Paths.UserDataDir))
+            {
+                Directory.Delete(Paths.UserDataDir, recursive: true);
+                logger?.Info($"Removed user data dir {Paths.UserDataDir}");
+            }
+        }
+        catch (Exception ex) { logger?.Warn($"User data dir delete: {ex.Message}"); }
 
         var installedExe = DefaultInstallExePath;
         var installDir   = DefaultInstallDir;
