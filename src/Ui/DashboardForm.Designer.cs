@@ -225,30 +225,28 @@ public sealed partial class DashboardForm
             Size      = new Size(848, 80),
             BackColor = Theme.Card,
         };
-        var postureLabels = new (string text, Color dot)[]
+        // Posture row keys are indexed in this order. RefreshPostureIndicators
+        // (in DashboardForm.cs) walks them and queries SecurityPosture for the
+        // live state on every status timer tick.
+        var postureKeys = new[]
         {
-            ("Defender",  Theme.PostureGood),
-            ("Firewall",  Theme.PostureGood),
-            ("UAC",       Theme.PostureGood),
-            ("RDP",       Theme.PostureGood),
-            ("SecureBoot",Theme.PostureGood),
-            ("TPM",       Theme.PostureGood),
-            ("HVCI",      Theme.PostureNa),
-            ("BitLocker", Theme.PostureNa),
+            "Defender", "Firewall", "UAC", "RDP",
+            "SecureBoot", "TPM", "HVCI", "BitLocker",
         };
-        for (int i = 0; i < postureLabels.Length; i++)
+        for (int i = 0; i < postureKeys.Length; i++)
         {
             int col = i % 4;
             int row = i / 4;
             var lbl = new Label
             {
-                Text      = "● " + postureLabels[i].text,
-                ForeColor = postureLabels[i].dot,
+                Text      = "● " + postureKeys[i],
+                ForeColor = Theme.PostureNa,    // starts gray; refresh sets the real color
                 Font      = new Font("Segoe UI", 9, FontStyle.Bold),
                 AutoSize  = true,
                 Location  = new Point(20 + col * 200, 18 + row * 28),
             };
             postureCard.Controls.Add(lbl);
+            _postureLabels[postureKeys[i]] = lbl;
         }
         page.Controls.Add(postureCard);
 
@@ -350,9 +348,57 @@ public sealed partial class DashboardForm
         };
         page.Controls.Add(title);
 
-        // Alerts list
-        _alertsList.Location      = new Point(8, 60);
-        _alertsList.Size          = new Size(540, 580);
+        // ── Filter row (search + severity + category + export buttons) ──
+        _alertSearch.Location  = new Point(8, 50);
+        _alertSearch.Size      = new Size(180, 24);
+        _alertSearch.Font      = Theme.Body(9);
+        _alertSearch.BackColor = Theme.Card;
+        _alertSearch.ForeColor = Theme.TextMain;
+        _alertSearch.BorderStyle = BorderStyle.FixedSingle;
+        _alertSearch.PlaceholderText = "Search alerts...";
+        _alertSearch.TextChanged += OnAlertSearchChanged;
+        page.Controls.Add(_alertSearch);
+
+        _alertSeverityFilter.Location      = new Point(196, 50);
+        _alertSeverityFilter.Size          = new Size(110, 24);
+        _alertSeverityFilter.DropDownStyle = ComboBoxStyle.DropDownList;
+        _alertSeverityFilter.BackColor     = Theme.Card;
+        _alertSeverityFilter.ForeColor     = Theme.TextMain;
+        _alertSeverityFilter.FlatStyle     = FlatStyle.Flat;
+        _alertSeverityFilter.Font          = Theme.Body(9);
+        _alertSeverityFilter.Items.AddRange(new object[] { "All", "Crit", "High", "Med", "Low", "Info" });
+        _alertSeverityFilter.SelectedIndex = 0;
+        _alertSeverityFilter.SelectedIndexChanged += OnAlertFilterChanged;
+        page.Controls.Add(_alertSeverityFilter);
+
+        _alertCategoryFilter.Location      = new Point(314, 50);
+        _alertCategoryFilter.Size          = new Size(150, 24);
+        _alertCategoryFilter.DropDownStyle = ComboBoxStyle.DropDownList;
+        _alertCategoryFilter.BackColor     = Theme.Card;
+        _alertCategoryFilter.ForeColor     = Theme.TextMain;
+        _alertCategoryFilter.FlatStyle     = FlatStyle.Flat;
+        _alertCategoryFilter.Font          = Theme.Body(9);
+        _alertCategoryFilter.Items.AddRange(new object[]
+        {
+            "All", "Connection", "Listener", "Process", "Driver", "Service",
+            "Registry", "Hosts", "Firmware", "HiddenProcess", "Memory", "BYOVD",
+            "RDP", "Security",
+        });
+        _alertCategoryFilter.SelectedIndex = 0;
+        _alertCategoryFilter.SelectedIndexChanged += OnAlertFilterChanged;
+        page.Controls.Add(_alertCategoryFilter);
+
+        // Export buttons sit on the right of the filter row
+        StyleSmallButton(_btnExportCsv,  "Export CSV",  new Point(472, 49));
+        _btnExportCsv.Click  += OnExportCsvClick;
+        StyleSmallButton(_btnExportJson, "Export JSON", new Point(572, 49));
+        _btnExportJson.Click += OnExportJsonClick;
+        page.Controls.Add(_btnExportCsv);
+        page.Controls.Add(_btnExportJson);
+
+        // ── Alerts list ──
+        _alertsList.Location      = new Point(8, 84);
+        _alertsList.Size          = new Size(540, 556);
         _alertsList.Anchor        = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left;
         _alertsList.View          = View.Details;
         _alertsList.FullRowSelect = true;
@@ -360,18 +406,19 @@ public sealed partial class DashboardForm
         _alertsList.BackColor     = Theme.Card;
         _alertsList.ForeColor     = Theme.BodyText;
         _alertsList.Font          = Theme.Mono(9);
-        _alertsList.HeaderStyle   = ColumnHeaderStyle.Nonclickable;
+        _alertsList.HeaderStyle   = ColumnHeaderStyle.Clickable;
         _alertsList.Columns.Add("Time",     85);
         _alertsList.Columns.Add("Severity", 65);
         _alertsList.Columns.Add("Category", 95);
         _alertsList.Columns.Add("Title",    140);
         _alertsList.Columns.Add("Message",  140);
         _alertsList.SelectedIndexChanged += OnAlertSelected;
+        _alertsList.ColumnClick += OnAlertColumnClick;
         page.Controls.Add(_alertsList);
 
         // Detail panel on the right
-        _alertDetail.Location  = new Point(560, 60);
-        _alertDetail.Size      = new Size(490, 580);
+        _alertDetail.Location  = new Point(560, 84);
+        _alertDetail.Size      = new Size(490, 556);
         _alertDetail.BackColor = Theme.Card;
         _alertDetail.Anchor    = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
@@ -394,19 +441,22 @@ public sealed partial class DashboardForm
         _alertDetail.Controls.Add(_alertDetailBody);
 
         // Action buttons
-        StyleActionButton(_btnIpLookup,    "IP Lookup",     new Point(16, 430), 110);
-        _btnIpLookup.Click   += OnIpLookupClick;
-        StyleActionButton(_btnOpenLog,     "Open Log",      new Point(132, 430), 110);
-        _btnOpenLog.Click    += OnOpenLogClick;
-        StyleActionButton(_btnRegedit,     "Open Regedit",  new Point(248, 430), 110);
-        _btnRegedit.Click    += OnRegeditClick;
-        StyleActionButton(_btnBlockIp,     "Block IP (FW)", new Point(16, 470), 226);
-        _btnBlockIp.Click    += OnBlockIpClick;
-        StyleActionButton(_btnKillProcess, "Kill PID",      new Point(248, 470), 226);
+        StyleActionButton(_btnIpLookup,    "IP Lookup",     new Point(16, 420), 110);
+        _btnIpLookup.Click    += OnIpLookupClick;
+        StyleActionButton(_btnOpenLog,     "Open Log",      new Point(132, 420), 110);
+        _btnOpenLog.Click     += OnOpenLogClick;
+        StyleActionButton(_btnRegedit,     "Open Regedit",  new Point(248, 420), 110);
+        _btnRegedit.Click     += OnRegeditClick;
+        StyleActionButton(_btnRestoreReg,  "Restore Reg",   new Point(364, 420), 110);
+        _btnRestoreReg.Click  += OnRestoreRegistryClick;
+        StyleActionButton(_btnBlockIp,     "Block IP (FW)", new Point(16, 460), 226);
+        _btnBlockIp.Click     += OnBlockIpClick;
+        StyleActionButton(_btnKillProcess, "Kill PID",      new Point(248, 460), 226);
         _btnKillProcess.Click += OnKillProcessClick;
         _alertDetail.Controls.Add(_btnIpLookup);
         _alertDetail.Controls.Add(_btnOpenLog);
         _alertDetail.Controls.Add(_btnRegedit);
+        _alertDetail.Controls.Add(_btnRestoreReg);
         _alertDetail.Controls.Add(_btnBlockIp);
         _alertDetail.Controls.Add(_btnKillProcess);
 
@@ -432,8 +482,21 @@ public sealed partial class DashboardForm
         btn.Visible    = false;
     }
 
+    private static void StyleSmallButton(Button btn, string text, Point loc)
+    {
+        btn.Text       = text;
+        btn.Location   = loc;
+        btn.Size       = new Size(96, 26);
+        btn.FlatStyle  = FlatStyle.Flat;
+        btn.BackColor  = Theme.BtnHover;
+        btn.ForeColor  = Theme.TextMain;
+        btn.Font       = new Font("Segoe UI", 9, FontStyle.Bold);
+        btn.Cursor     = Cursors.Hand;
+        btn.FlatAppearance.BorderSize = 0;
+    }
+
     // ============================================================================
-    //  PAGE 3: AI THREATS  (placeholder — full engine wiring is a future task)
+    //  PAGE 3: AI THREATS — wired to HiddenProcess, Memory, BYOVD engines
     // ============================================================================
     private Panel BuildAiThreatsPage()
     {
@@ -451,31 +514,51 @@ public sealed partial class DashboardForm
 
         var subtitle = new Label
         {
-            Text =
-                "Will run an 8-engine scan: Memory, Behavioral, SecureBoot/TPM, BYOVD,\n" +
-                "Hidden Process, ETW, Driver Integrity, Hypervisor.\n\n" +
-                "The 8 engines themselves are queued as a follow-up port — the page is\n" +
-                "in place so the layout is preserved and the wiring is ready.",
-            Font      = Theme.Body(10),
+            Text      = "On-demand scan: Hidden Process · RWX Memory · BYOVD vulnerable drivers",
+            Font      = Theme.Body(9),
             ForeColor = Theme.TextDim,
             AutoSize  = true,
-            Location  = new Point(8, 50),
+            Location  = new Point(8, 48),
         };
         page.Controls.Add(subtitle);
 
         var scanBtn = new Button
         {
             Text      = "Scan Now",
-            Location  = new Point(8, 160),
-            Size      = new Size(140, 36),
+            Location  = new Point(8, 76),
+            Size      = new Size(140, 32),
             FlatStyle = FlatStyle.Flat,
             BackColor = Theme.Purple,
             ForeColor = Theme.TextMain,
             Font      = new Font("Segoe UI", 10, FontStyle.Bold),
-            Enabled   = false,
+            Cursor    = Cursors.Hand,
         };
         scanBtn.FlatAppearance.BorderSize = 0;
+        scanBtn.Click += OnAiScanClick;
         page.Controls.Add(scanBtn);
+
+        _aiStatusLabel.Location  = new Point(160, 84);
+        _aiStatusLabel.AutoSize  = true;
+        _aiStatusLabel.Font      = Theme.Body(9);
+        _aiStatusLabel.ForeColor = Theme.TextDim;
+        _aiStatusLabel.Text      = "Ready.";
+        page.Controls.Add(_aiStatusLabel);
+
+        _aiResultsList.Location      = new Point(8, 124);
+        _aiResultsList.Size          = new Size(1042, 520);
+        _aiResultsList.Anchor        = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        _aiResultsList.View          = View.Details;
+        _aiResultsList.FullRowSelect = true;
+        _aiResultsList.GridLines     = false;
+        _aiResultsList.BackColor     = Theme.Card;
+        _aiResultsList.ForeColor     = Theme.BodyText;
+        _aiResultsList.Font          = Theme.Mono(9);
+        _aiResultsList.HeaderStyle   = ColumnHeaderStyle.Nonclickable;
+        _aiResultsList.Columns.Add("Engine",   140);
+        _aiResultsList.Columns.Add("Severity", 80);
+        _aiResultsList.Columns.Add("Title",    250);
+        _aiResultsList.Columns.Add("Message",  560);
+        page.Controls.Add(_aiResultsList);
 
         return page;
     }

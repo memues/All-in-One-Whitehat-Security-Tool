@@ -131,6 +131,162 @@ if (-not (Get-NetFirewallRule -DisplayName $ruleOut -ErrorAction SilentlyContinu
     public static int KillProcessElevated(int pid, Logger? logger = null)
         => RunElevated($"Stop-Process -Id {pid} -Force -ErrorAction Stop", logger);
 
+    // ------------------------------------------------------------------------
+    //  v7.3.0 — settings that previously persisted to JSON only
+    // ------------------------------------------------------------------------
+
+    /// <summary>
+    /// Block all RFC1918 traffic via firewall rules. Disrupts file/printer
+    /// sharing on the local network — only enable if you really mean it.
+    /// </summary>
+    public static int SetBlockLanRule(bool enabled, Logger? logger = null)
+    {
+        var script = enabled
+            ? @"
+$names = 'WHS_BlockLAN_Out_192168','WHS_BlockLAN_Out_10','WHS_BlockLAN_Out_172'
+$addrs = '192.168.0.0/16',          '10.0.0.0/8',          '172.16.0.0/12'
+for ($i = 0; $i -lt $names.Count; $i++) {
+    if (-not (Get-NetFirewallRule -DisplayName $names[$i] -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName $names[$i] -Direction Outbound -Action Block -RemoteAddress $addrs[$i] -Profile Any | Out-Null
+    }
+}"
+            : @"
+'WHS_BlockLAN_Out_192168','WHS_BlockLAN_Out_10','WHS_BlockLAN_Out_172' | ForEach-Object {
+    Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+}";
+        return RunElevated(script, logger);
+    }
+
+    /// <summary>
+    /// Block SMB / NetBIOS / LLMNR / mDNS — kills network device discovery
+    /// and file sharing on the local subnet without isolating the machine
+    /// from the internet.
+    /// </summary>
+    public static int SetBlockDevicesRule(bool enabled, Logger? logger = null)
+    {
+        var script = enabled
+            ? @"
+$rules = @(
+    @{ Name='WHS_BlockDev_SMB_Out';    Dir='Outbound'; Proto='TCP'; Port='445' },
+    @{ Name='WHS_BlockDev_SMB_In';     Dir='Inbound';  Proto='TCP'; Port='445' },
+    @{ Name='WHS_BlockDev_NetBIOS_In'; Dir='Inbound';  Proto='TCP'; Port='139' },
+    @{ Name='WHS_BlockDev_LLMNR_Out';  Dir='Outbound'; Proto='UDP'; Port='5355' },
+    @{ Name='WHS_BlockDev_mDNS_Out';   Dir='Outbound'; Proto='UDP'; Port='5353' }
+)
+foreach ($r in $rules) {
+    if (-not (Get-NetFirewallRule -DisplayName $r.Name -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName $r.Name -Direction $r.Dir -Action Block -Protocol $r.Proto -LocalPort $r.Port -Profile Any | Out-Null
+    }
+}"
+            : @"
+'WHS_BlockDev_SMB_Out','WHS_BlockDev_SMB_In','WHS_BlockDev_NetBIOS_In','WHS_BlockDev_LLMNR_Out','WHS_BlockDev_mDNS_Out' | ForEach-Object {
+    Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+}";
+        return RunElevated(script, logger);
+    }
+
+    /// <summary>
+    /// Add or remove a managed block of hostnames in the system hosts file.
+    /// Categories: "Trackers", "Malware", "Telemetry". The block is wrapped
+    /// in `# WHS-BEGIN-{category}` / `# WHS-END-{category}` markers so the
+    /// uninstaller can find and remove it without touching anything else.
+    /// </summary>
+    public static int SetHostsBlocklist(string category, bool enabled, Logger? logger = null)
+    {
+        var domains = HostsBlocklists.ForCategory(category);
+        if (domains.Length == 0) return 0;
+
+        var beginMark = $"# WHS-BEGIN-{category}";
+        var endMark   = $"# WHS-END-{category}";
+
+        // Build the line list inside C# rather than embedding it in PS so we
+        // do not have to worry about quoting. The PS script just rewrites
+        // the hosts file with the managed block added or removed.
+        var lines = string.Join("\r\n",
+            System.Linq.Enumerable.Select(domains, d => "0.0.0.0  " + d));
+
+        var b64Block = System.Convert.ToBase64String(
+            System.Text.Encoding.UTF8.GetBytes($"{beginMark}\r\n{lines}\r\n{endMark}\r\n"));
+
+        var script = enabled
+            ? $@"
+$hosts = ""$env:SystemRoot\System32\drivers\etc\hosts""
+$content = if (Test-Path $hosts) {{ Get-Content $hosts -Raw }} else {{ '' }}
+# Strip any pre-existing managed block for this category, then append fresh
+$pattern = '(?s)# WHS-BEGIN-{category}.*?# WHS-END-{category}\r?\n?'
+$content = [System.Text.RegularExpressions.Regex]::Replace($content, $pattern, '')
+$block = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{b64Block}'))
+if (-not $content.EndsWith(""`r`n"")) {{ $content += ""`r`n"" }}
+$content += $block
+[System.IO.File]::WriteAllText($hosts, $content)"
+            : $@"
+$hosts = ""$env:SystemRoot\System32\drivers\etc\hosts""
+if (Test-Path $hosts) {{
+    $content = Get-Content $hosts -Raw
+    $pattern = '(?s)# WHS-BEGIN-{category}.*?# WHS-END-{category}\r?\n?'
+    $content = [System.Text.RegularExpressions.Regex]::Replace($content, $pattern, '')
+    [System.IO.File]::WriteAllText($hosts, $content)
+}}";
+        return RunElevated(script, logger);
+    }
+
+    /// <summary>
+    /// Block outbound port 53 traffic so applications can no longer bypass
+    /// the system DNS resolver. Used together with DNS_Provider to enforce
+    /// a specific DNS server for everything on the machine.
+    /// </summary>
+    public static int SetDnsBypassBlock(bool enabled, Logger? logger = null)
+    {
+        var script = enabled
+            ? @"if (-not (Get-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -Profile Any | Out-Null
+}"
+            : "Get-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -ErrorAction SilentlyContinue | Remove-NetFirewallRule";
+        return RunElevated(script, logger);
+    }
+
+    /// <summary>
+    /// Configure DNS-over-HTTPS for the active providers. Requires Windows 11
+    /// (the Set-DnsClientDohServerAddress cmdlet was added then). On older
+    /// Windows the script just no-ops without erroring.
+    /// </summary>
+    public static int SetDnsOverHttps(bool enabled, string provider, Logger? logger = null)
+    {
+        // DoH endpoints for the providers offered in the Settings dropdown
+        var (v4Primary, dohTemplate) = provider switch
+        {
+            "Cloudflare" => ("1.1.1.1",        "https://cloudflare-dns.com/dns-query"),
+            "Quad9"      => ("9.9.9.9",        "https://dns.quad9.net/dns-query"),
+            "Google"     => ("8.8.8.8",        "https://dns.google/dns-query"),
+            "AdGuard"    => ("94.140.14.14",   "https://dns.adguard.com/dns-query"),
+            _            => ("",               ""),
+        };
+
+        if (!enabled || string.IsNullOrEmpty(v4Primary))
+        {
+            // Best-effort: clear the DoH server entry. Set-DnsClientDohServerAddress
+            // -ServerAddress... -Clear is not a thing, so just remove via Remove-.
+            var clearScript = @"
+if (Get-Command Set-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
+    try { Get-DnsClientDohServerAddress | Remove-DnsClientDohServerAddress -Confirm:$false } catch {}
+}";
+            return RunElevated(clearScript, logger);
+        }
+
+        var setScript = $@"
+if (Get-Command Set-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {{
+    try {{
+        Add-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction Stop
+    }} catch {{
+        Set-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
+    }}
+    Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {{
+        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('{v4Primary}')
+    }}
+}}";
+        return RunElevated(setScript, logger);
+    }
+
     public static int SetDnsProvider(string providerName, Logger? logger = null)
     {
         // providerName comes from the Settings dropdown — see DnsProvider.cs

@@ -168,6 +168,11 @@ internal static class Program
         host.Register(new RegistryEngine());
         host.Register(new HostsEngine());
         host.Register(new FirmwareEngine());
+        // v7.3.0 — three new "AI" engines that re-use the existing P/Invoke
+        // surface in NativeMethods.cs.
+        host.Register(new HiddenProcessEngine());
+        host.Register(new MemoryScannerEngine());
+        host.Register(new ByovdEngine());
 
         // ── Tray context owns the message pump ──────────────────────────
         try

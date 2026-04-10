@@ -89,30 +89,45 @@ CLI flags:
 
 ## Features
 
-| Feature                                          | Status |
-|--------------------------------------------------|:------:|
-| System tray icon + context menu                  | ✓ |
-| Windows 11 NotifyIcon `IsPromoted` fix           | ✓ |
-| Balloon / toast notifications                    | ✓ |
-| WinForms dashboard with Alerts / Logs / Settings tabs | ✓ |
-| Outbound TCP connection tracker                  | ✓ |
-| New listening port detection                     | ✓ |
-| Unsigned process detection                       | ✓ |
-| Driver baseline + change detection               | ✓ |
-| Service baseline + change detection              | ✓ |
-| Run / RunOnce registry watch                     | ✓ |
-| Tamper-key registry watch                        | ✓ |
-| Hosts-file SHA-256 watch                         | ✓ |
-| Firmware (`.sys` / `.efi` / `.rom`) hash watch   | ✓ |
-| Hidden process via `NtQuerySystemInformation`    | ✓ |
-| **`Connection` notification opt-in by default**  | ✓ |
-| Per-day rolling log files                        | ✓ |
-| Single-instance mutex                            | ✓ |
-| BYOVD vulnerable driver detection                | TODO |
-| WinForms dashboard charts                        | TODO |
-| Memory-region scanning (ML risk scoring)         | TODO |
-| WFP firewall management                          | TODO |
-| TPM / Secure Boot / BitLocker dashboard panels   | TODO |
+| Feature                                              | Status |
+|------------------------------------------------------|:------:|
+| Six-page sidebar dashboard (Status / Alerts / AI Threats / Settings / Logs / Console) | ✓ |
+| Self-installing single .exe (Apps & Features integration) | ✓ |
+| Auto-start at logon via HKLM Run key (`--silent`)    | ✓ |
+| Desktop + Start Menu shortcuts on install            | ✓ |
+| System tray icon + context menu                      | ✓ |
+| Windows 11 NotifyIcon `IsPromoted` self-promotion    | ✓ |
+| Balloon / toast notifications                        | ✓ |
+| Outbound TCP connection tracker                      | ✓ |
+| New listening port detection                         | ✓ |
+| Unsigned process detection                           | ✓ |
+| Driver baseline + change detection                   | ✓ |
+| Service baseline + change detection                  | ✓ |
+| Run / RunOnce registry watch                         | ✓ |
+| Tamper-key registry watch (32 + 64-bit views)        | ✓ |
+| Hosts-file SHA-256 watch                             | ✓ |
+| Firmware (`.sys` / `.efi` / `.rom`) hash watch       | ✓ |
+| Hidden process detection via `NtQuerySystemInformation` | ✓ |
+| RWX private memory scanner                           | ✓ |
+| BYOVD vulnerable driver detection                    | ✓ |
+| **`Connection` notification opt-in by default**      | ✓ |
+| Per-day rolling log files                            | ✓ |
+| Single-instance mutex                                | ✓ |
+| Status page **live** posture row (Defender / Firewall / UAC / RDP / SecureBoot / TPM / HVCI / BitLocker) | ✓ |
+| Alerts page search + severity & category filters     | ✓ |
+| Alerts page export to CSV / JSON                     | ✓ |
+| Alerts page sortable column headers                  | ✓ |
+| Audible alert (`BeepOnAlert`)                        | ✓ |
+| Alert detail toggle (`ShowThreatDetails`)            | ✓ |
+| 3 firewall profile toggles + 5 firewall block rules  | ✓ |
+| Hosts-based blocklists (Trackers / Malware / Telemetry) | ✓ |
+| DNS provider switching with revert-on-failure        | ✓ |
+| DNS-over-HTTPS (Windows 11)                          | ✓ |
+| Block DNS bypass (port 53 outbound)                  | ✓ |
+| ETW provider listener                                | TODO |
+| WinRT toast (vs legacy balloons)                     | TODO |
+| Sidebar collapse animation                           | TODO |
+| Live charts on Status page                           | TODO |
 
 The TODO items are documented in the source so adding them later does not require changes to the `IMonitorEngine` contract or the dispatcher.
 

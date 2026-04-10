@@ -41,13 +41,15 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         _tray = new NotifyIcon
         {
-            Icon             = BuildShieldIcon(),
+            Icon             = ShieldIcon,
             Text             = "Whitehat Security",
             Visible          = true,
             ContextMenuStrip = BuildContextMenu(),
         };
         _tray.DoubleClick       += (_, _) => OpenDashboard();
-        _tray.BalloonTipClicked += (_, _) => OpenDashboard();
+        // BalloonTipClicked routes straight to the Alerts tab — that is the
+        // only thing the user could possibly want to see right after a toast.
+        _tray.BalloonTipClicked += (_, _) => OpenDashboard("Alerts");
 
         // Sink that forwards alerts into the dashboard's listview when it
         // exists. Always registered so alerts are buffered even before the
@@ -127,9 +129,14 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// Draws the same blue shield-with-checkmark icon the PowerShell port
-    /// generates in Initialize-TrayIcon (~line 5333).
+    /// Cached blue shield-with-checkmark icon. Built once on first access
+    /// instead of every time TrayApplicationContext is constructed; this
+    /// also lets us free the source HICON properly via DestroyIcon (the
+    /// previous code leaked the GDI handle every time it ran because
+    /// Icon.FromHandle does not release the underlying icon).
     /// </summary>
+    private static readonly Icon ShieldIcon = BuildShieldIcon();
+
     private static Icon BuildShieldIcon()
     {
         using var bmp = new Bitmap(32, 32);
@@ -166,7 +173,22 @@ public sealed class TrayApplicationContext : ApplicationContext
             g.DrawLine(checkPen, 10, 16, 14, 21);
             g.DrawLine(checkPen, 14, 21, 22, 11);
         }
-        return Icon.FromHandle(bmp.GetHicon());
+
+        // Take a copy of the bitmap into a Win32 HICON, wrap it in
+        // System.Drawing.Icon, then immediately destroy the HICON. The Icon
+        // object holds its own copy internally, so destroying the source is
+        // safe. Without DestroyIcon every call here leaks a GDI handle.
+        var hicon = bmp.GetHicon();
+        try
+        {
+            using var temp = Icon.FromHandle(hicon);
+            // Clone the icon out so the HICON can be destroyed safely.
+            return (Icon)temp.Clone();
+        }
+        finally
+        {
+            NativeMethods.DestroyIcon(hicon);
+        }
     }
 }
 

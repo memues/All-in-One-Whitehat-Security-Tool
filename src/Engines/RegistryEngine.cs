@@ -16,9 +16,22 @@ public sealed class RegistryEngine : IMonitorEngine
     public string Name => "Registry";
 
     /// <summary>
-    /// (RegistryHive, KeyPath, ValueName) → last observed value (string form).
+    /// (RegistryHive, RegistryView, KeyPath, ValueName) → last observed
+    /// string-form value. The RegistryView part lets us track the 32-bit
+    /// (WOW6432Node) and 64-bit views of the same key independently — both
+    /// are valid persistence locations on a 64-bit system.
     /// </summary>
-    private readonly Dictionary<(RegistryHive, string, string), string?> _baseline = new();
+    private readonly Dictionary<(RegistryHive, RegistryView, string, string), string?> _baseline = new();
+
+    /// <summary>
+    /// Both views are scanned on 64-bit systems. The 32-bit view sees the
+    /// WOW6432Node namespace, where some malware hides persistence to evade
+    /// 64-bit-only scanners.
+    /// </summary>
+    private static readonly RegistryView[] WatchedViews =
+        Environment.Is64BitOperatingSystem
+            ? new[] { RegistryView.Registry64, RegistryView.Registry32 }
+            : new[] { RegistryView.Registry32 };
 
     private static readonly (RegistryHive Hive, string Key, string Value)[] WatchedValues =
     {
@@ -47,20 +60,23 @@ public sealed class RegistryEngine : IMonitorEngine
 
     public void Initialize()
     {
-        foreach (var (hive, key, name) in WatchedValues)
-            ScanKey(hive, key, name, baselineMode: true);
+        foreach (var view in WatchedViews)
+            foreach (var (hive, key, name) in WatchedValues)
+                ScanKey(hive, view, key, name, baselineMode: true);
     }
 
     public IEnumerable<Alert> Scan()
     {
         var alerts = new List<Alert>();
-        foreach (var (hive, key, name) in WatchedValues)
-            ScanKey(hive, key, name, baselineMode: false, alerts: alerts);
+        foreach (var view in WatchedViews)
+            foreach (var (hive, key, name) in WatchedValues)
+                ScanKey(hive, view, key, name, baselineMode: false, alerts: alerts);
         return alerts;
     }
 
     private void ScanKey(
         RegistryHive  hive,
+        RegistryView  view,
         string        keyPath,
         string        valueNameOrStar,
         bool          baselineMode,
@@ -68,7 +84,7 @@ public sealed class RegistryEngine : IMonitorEngine
     {
         try
         {
-            using var rootKey = OpenKey(hive);
+            using var rootKey = RegistryKey.OpenBaseKey(hive, view);
             using var sub = rootKey.OpenSubKey(keyPath);
             if (sub is null) return;
 
@@ -79,7 +95,7 @@ public sealed class RegistryEngine : IMonitorEngine
             foreach (var vn in valueNames)
             {
                 var current = sub.GetValue(vn)?.ToString();
-                var slot = (hive, keyPath, vn);
+                var slot = (hive, view, keyPath, vn);
 
                 if (baselineMode)
                 {
@@ -91,12 +107,12 @@ public sealed class RegistryEngine : IMonitorEngine
                 {
                     _baseline[slot] = current;
                     if (current is not null)
-                        alerts?.Add(MakeAlert(hive, keyPath, vn, "added", current));
+                        alerts?.Add(MakeAlert(hive, view, keyPath, vn, "added", current));
                 }
                 else if (!Equals(prev, current))
                 {
                     _baseline[slot] = current;
-                    alerts?.Add(MakeAlert(hive, keyPath, vn, "changed", $"{prev} -> {current}"));
+                    alerts?.Add(MakeAlert(hive, view, keyPath, vn, "changed", $"{prev} -> {current}"));
                 }
             }
         }
@@ -106,18 +122,20 @@ public sealed class RegistryEngine : IMonitorEngine
         }
     }
 
-    private static RegistryKey OpenKey(RegistryHive hive) => hive switch
+    private static Alert MakeAlert(
+        RegistryHive hive,
+        RegistryView view,
+        string       keyPath,
+        string       value,
+        string       action,
+        string       detail)
     {
-        RegistryHive.LocalMachine => RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64),
-        RegistryHive.CurrentUser  => RegistryKey.OpenBaseKey(RegistryHive.CurrentUser,  RegistryView.Registry64),
-        _                         => RegistryKey.OpenBaseKey(hive, RegistryView.Default),
-    };
-
-    private static Alert MakeAlert(RegistryHive hive, string keyPath, string value, string action, string detail)
-        => new(
+        var viewTag = view == RegistryView.Registry32 ? " (32)" : "";
+        return new Alert(
             Timestamp: DateTime.Now,
             Category:  "Registry",
             Title:     $"REGISTRY {action.ToUpperInvariant()}",
-            Message:   $"{hive}\\{keyPath}!{value}: {detail}",
+            Message:   $"{hive}{viewTag}\\{keyPath}!{value}: {detail}",
             Severity:  AlertSeverity.Med);
+    }
 }

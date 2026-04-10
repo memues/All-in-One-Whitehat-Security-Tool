@@ -28,59 +28,76 @@ public sealed class ProcessEngine : IMonitorEngine
 
     public void Initialize()
     {
-        foreach (var p in SafeEnumerate())
-            _knownPids.Add(p.Id);
+        // Materialise the snapshot then dispose every Process so we never
+        // leak the open kernel handles that Process.GetProcesses returns.
+        Process[] procs;
+        try { procs = Process.GetProcesses(); }
+        catch { return; }
+        try
+        {
+            foreach (var p in procs)
+            {
+                if (p.Id == 0 || p.Id == 4) continue;   // Idle / System
+                _knownPids.Add(p.Id);
+            }
+        }
+        finally
+        {
+            foreach (var p in procs) p.Dispose();
+        }
     }
 
     public IEnumerable<Alert> Scan()
     {
-        foreach (var p in SafeEnumerate())
+        var alerts = new List<Alert>();
+        Process[] procs;
+        try { procs = Process.GetProcesses(); }
+        catch { return alerts; }
+
+        try
         {
-            if (!_knownPids.Add(p.Id)) continue;
-
-            string? exePath;
-            try { exePath = p.MainModule?.FileName; }
-            catch { continue; }
-            if (string.IsNullOrEmpty(exePath)) continue;
-
-            bool inSuspiciousPath = false;
-            foreach (var frag in SuspiciousPathFragments)
+            foreach (var p in procs)
             {
-                if (exePath.IndexOf(frag, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (p.Id == 0 || p.Id == 4) continue;   // Idle / System
+                if (!_knownPids.Add(p.Id)) continue;
+
+                string? exePath;
+                try { exePath = p.MainModule?.FileName; }
+                catch { continue; }
+                if (string.IsNullOrEmpty(exePath)) continue;
+
+                bool inSuspiciousPath = false;
+                foreach (var frag in SuspiciousPathFragments)
                 {
-                    inSuspiciousPath = true;
-                    break;
+                    if (exePath.IndexOf(frag, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        inSuspiciousPath = true;
+                        break;
+                    }
+                }
+
+                if (!IsAuthenticodeSigned(exePath))
+                {
+                    alerts.Add(new Alert(
+                        Timestamp:   DateTime.Now,
+                        Category:    "Process",
+                        Title:       inSuspiciousPath ? "UNSIGNED PROCESS IN SUSPICIOUS LOCATION" : "UNSIGNED NEW PROCESS",
+                        Message:     $"{p.ProcessName} (PID {p.Id})",
+                        Severity:    inSuspiciousPath ? AlertSeverity.High : AlertSeverity.Med,
+                        ProcessName: p.ProcessName,
+                        ProcessId:   p.Id,
+                        Path:        exePath));
                 }
             }
-
-            bool isSigned = IsAuthenticodeSigned(exePath);
-
-            if (!isSigned)
-            {
-                yield return new Alert(
-                    Timestamp:   DateTime.Now,
-                    Category:    "Process",
-                    Title:       inSuspiciousPath ? "UNSIGNED PROCESS IN SUSPICIOUS LOCATION" : "UNSIGNED NEW PROCESS",
-                    Message:     $"{p.ProcessName} (PID {p.Id})",
-                    Severity:    inSuspiciousPath ? AlertSeverity.High : AlertSeverity.Med,
-                    ProcessName: p.ProcessName,
-                    ProcessId:   p.Id,
-                    Path:        exePath);
-            }
         }
-    }
-
-    private static IEnumerable<Process> SafeEnumerate()
-    {
-        Process[] all;
-        try { all = Process.GetProcesses(); }
-        catch { yield break; }
-
-        foreach (var p in all)
+        finally
         {
-            if (p.Id == 0 || p.Id == 4) continue;   // Idle / System
-            yield return p;
+            // Dispose every Process — including the ones we yielded above —
+            // because we materialise the alerts before returning.
+            foreach (var p in procs) p.Dispose();
         }
+
+        return alerts;
     }
 
     /// <summary>

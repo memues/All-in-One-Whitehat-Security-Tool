@@ -118,4 +118,14 @@ internal static class NativeMethods
 
     [DllImport("shell32.dll", CharSet = CharSet.Auto)]
     public static extern bool Shell_NotifyIcon(uint dwMessage, ref NotifyIconData pnid);
+
+    // -------------------------------------------------------------------------
+    // GDI helpers — used by TrayApplicationContext to release the HICON
+    // returned by Bitmap.GetHicon() after wrapping it in System.Drawing.Icon.
+    // Without DestroyIcon, every call to GetHicon leaks one GDI handle.
+    // -------------------------------------------------------------------------
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyIcon(IntPtr hIcon);
 }

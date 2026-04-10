@@ -22,6 +22,33 @@ public sealed class ToastNotifier : IAlertSink
 
     public void Receive(Alert alert)
     {
+        // Audible notification — runs even if toasts are disabled, since
+        // some users want a beep without the visual popup. Severity-mapped
+        // beep counts match the PowerShell port.
+        if (_config.BeepOnAlert)
+        {
+            int beeps = alert.Severity switch
+            {
+                AlertSeverity.Crit => 3,
+                AlertSeverity.High => 2,
+                AlertSeverity.Med  => 1,
+                _                  => 0,
+            };
+            try
+            {
+                for (int i = 0; i < beeps; i++)
+                {
+                    System.Media.SystemSounds.Beep.Play();
+                    if (i < beeps - 1) System.Threading.Thread.Sleep(180);
+                }
+            }
+            catch
+            {
+                // SystemSounds.Beep should always be available on a desktop
+                // OS, but never let an audio failure crash the alert path.
+            }
+        }
+
         if (!_config.EnableToastNotifications) return;
 
         try

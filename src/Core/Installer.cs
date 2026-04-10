@@ -23,7 +23,7 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.2.2";
+    public const string ProductVersion = "7.3.0";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
 
@@ -118,15 +118,34 @@ public static class Installer
 
         Directory.CreateDirectory(dstDir);
 
-        // Copy the binary. We use a temp name then rename so a partial copy
-        // never leaves a half-written .exe at the canonical path.
+        // Copy the binary to a temp name then atomically swap it into place.
+        // We try plain Move first; if the destination is locked (the previous
+        // version is still running), File.Replace handles the swap by routing
+        // through a backup file.
         var tmp = dstExe + ".new";
         File.Copy(src, tmp, overwrite: true);
-        if (File.Exists(dstExe))
+
+        if (!File.Exists(dstExe))
         {
-            try { File.Delete(dstExe); } catch { }
+            File.Move(tmp, dstExe);
         }
-        File.Move(tmp, dstExe);
+        else
+        {
+            try
+            {
+                File.Delete(dstExe);
+                File.Move(tmp, dstExe);
+            }
+            catch (IOException)
+            {
+                // Locked — the .exe is in use. Use File.Replace to swap
+                // through a backup, which works even when the target is open.
+                var bak = dstExe + ".bak";
+                try { File.Delete(bak); } catch { }
+                File.Replace(tmp, dstExe, bak, ignoreMetadataErrors: true);
+                try { File.Delete(bak); } catch { }
+            }
+        }
         logger?.Info($"Installed binary to {dstExe}");
 
         // Register in Add/Remove Programs
