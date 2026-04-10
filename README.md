@@ -35,8 +35,13 @@ The published binary lives at `bin\Release\net8.0-windows\win-x64\publish\Whiteh
 
 The `.exe` is its own installer. Just download `WhitehatSecurity.exe` from the latest release and double-click it:
 
-- **First run from outside Program Files**: a small dialog asks whether you want to install system-wide. Yes → triggers UAC, copies the `.exe` to `C:\Program Files\Whitehat Security\`, registers in Windows **Apps & Features**, creates Start Menu and Public Desktop shortcuts. No → just runs the current copy once.
-- **Uninstall**: open *Settings → Apps → Apps & Features*, find **Whitehat Security**, click *Uninstall*. Or run `WhitehatSecurity.exe --uninstall` from a terminal.
+- **First run from outside Program Files**: a small dialog asks whether you want to install system-wide. Yes → triggers UAC, then:
+  - copies the `.exe` to `C:\Program Files\Whitehat Security\`
+  - registers in Windows **Apps & Features**
+  - creates a **Start Menu** shortcut
+  - creates a shortcut on **the user's Desktop** (handles OneDrive Known Folder Move) and on the **Public Desktop**
+  - adds an **HKLM\…\Run** entry so the program **auto-starts at every logon** in tray-only mode (`--silent`)
+- **Uninstall**: open *Settings → Apps → Apps & Features*, find **Whitehat Security**, click *Uninstall*. Or run `WhitehatSecurity.exe --uninstall` from a terminal. The uninstaller removes the install dir, both desktop shortcuts, the Start Menu shortcut, the Apps & Features registry entry, and the auto-start Run entry.
 
 CLI flags:
 

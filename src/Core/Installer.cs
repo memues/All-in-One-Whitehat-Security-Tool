@@ -23,7 +23,7 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.2.0";
+    public const string ProductVersion = "7.2.1";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
 
@@ -48,6 +48,28 @@ public static class Installer
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
             ProductName + ".lnk");
+
+    /// <summary>
+    /// Path to the per-user Desktop shortcut. On systems with OneDrive
+    /// "Known Folder Move" enabled, this resolves to the redirected
+    /// OneDrive\Desktop folder, which is exactly the directory the user
+    /// actually sees on their screen — the Public Desktop entry alone is
+    /// invisible there. We create both to cover both setups.
+    /// </summary>
+    public static string UserDesktopShortcut =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            ProductName + ".lnk");
+
+    /// <summary>
+    /// Where Windows looks for system-wide auto-start entries. The installer
+    /// writes a value here pointing at the installed exe with --silent so
+    /// that the program comes up as a tray icon (no dashboard) at every
+    /// logon. Same convention used by most installed Windows apps.
+    /// </summary>
+    public const string RunKeyPath =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    public const string RunValueName = "WhitehatSecurity";
 
     /// <summary>
     /// Returns true when the running .exe lives inside the canonical install
@@ -111,9 +133,28 @@ public static class Installer
         WriteUninstallKey(dstExe, dstDir);
         logger?.Info("Registered in Add/Remove Programs");
 
-        // Shortcuts
-        try { CreateShortcut(StartMenuShortcut,    dstExe); } catch (Exception ex) { logger?.Warn($"Start menu shortcut: {ex.Message}"); }
-        try { CreateShortcut(PublicDesktopShortcut, dstExe); } catch (Exception ex) { logger?.Warn($"Desktop shortcut: {ex.Message}"); }
+        // Shortcuts — create on every plausible desktop location so it shows
+        // up regardless of OneDrive Known Folder Move state. The installer
+        // also drops one in the Common Desktop and the Common Start Menu so
+        // every user on the machine sees it.
+        try { CreateShortcut(StartMenuShortcut,     dstExe); } catch (Exception ex) { logger?.Warn($"Start menu shortcut: {ex.Message}"); }
+        try { CreateShortcut(PublicDesktopShortcut, dstExe); } catch (Exception ex) { logger?.Warn($"Public desktop shortcut: {ex.Message}"); }
+        try { CreateShortcut(UserDesktopShortcut,   dstExe); } catch (Exception ex) { logger?.Warn($"User desktop shortcut: {ex.Message}"); }
+
+        // Auto-start at logon. The Run key is the standard mechanism for
+        // installed Windows apps; the --silent flag keeps the dashboard
+        // closed so it just shows up in the system tray, the way every
+        // other security tool does.
+        try
+        {
+            using var run = Registry.LocalMachine.CreateSubKey(RunKeyPath, writable: true);
+            run?.SetValue(RunValueName, $"\"{dstExe}\" --silent", RegistryValueKind.String);
+            logger?.Info("Auto-start at logon enabled (HKLM Run key)");
+        }
+        catch (Exception ex)
+        {
+            logger?.Warn($"Auto-start: {ex.Message}");
+        }
     }
 
     private static void WriteUninstallKey(string installedExe, string installDir)
@@ -186,9 +227,22 @@ public static class Installer
         }
         catch (Exception ex) { logger?.Warn($"Registry delete: {ex.Message}"); }
 
+        // Auto-start Run key
+        try
+        {
+            using var run = Registry.LocalMachine.OpenSubKey(RunKeyPath, writable: true);
+            if (run is not null && run.GetValue(RunValueName) is not null)
+            {
+                run.DeleteValue(RunValueName, throwOnMissingValue: false);
+                logger?.Info("Removed auto-start Run key");
+            }
+        }
+        catch (Exception ex) { logger?.Warn($"Run key delete: {ex.Message}"); }
+
         // Shortcuts
         TryDelete(StartMenuShortcut,     logger);
         TryDelete(PublicDesktopShortcut, logger);
+        TryDelete(UserDesktopShortcut,   logger);
 
         var installedExe = DefaultInstallExePath;
         var installDir   = DefaultInstallDir;
