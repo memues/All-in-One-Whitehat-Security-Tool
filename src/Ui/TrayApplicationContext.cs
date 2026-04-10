@@ -80,7 +80,9 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private static string GetExeNameHint()
     {
-        var exe = Assembly.GetEntryAssembly()?.Location ?? "WhitehatSecurity";
+        // Environment.ProcessPath is single-file-safe; Assembly.Location returns
+        // empty string for assemblies embedded inside a single-file bundle.
+        var exe = Environment.ProcessPath ?? "WhitehatSecurity";
         return Path.GetFileNameWithoutExtension(exe);
     }
 

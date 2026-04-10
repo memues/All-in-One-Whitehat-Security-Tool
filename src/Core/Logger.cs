@@ -12,7 +12,8 @@ public sealed class Logger
 {
     private readonly string _logsDir;
     private readonly string _hostName;
-    private readonly Lock _lock = new();
+    // .NET 8 has no `Lock` type (added in .NET 9 / C# 13). Plain object is fine.
+    private readonly object _lock = new();
 
     public Logger(string logsDir)
     {

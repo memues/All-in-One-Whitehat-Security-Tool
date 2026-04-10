@@ -79,15 +79,21 @@ public sealed class ConnectionEngine : IMonitorEngine
         // row layout (MibTcp6RowOwnerPid).
     }
 
-    private static unsafe IEnumerable<ConnectionRecord> QueryTcp4()
+    // Note: collected into a List rather than `yield return`-ed because
+    // mixing iterator methods with the `unsafe` flag (or with try/finally
+    // around an unmanaged buffer) is restricted in C# 12. Cleaner to
+    // materialize the list and free the buffer in one place.
+    private static List<ConnectionRecord> QueryTcp4()
     {
+        var result = new List<ConnectionRecord>();
+
         int size = 0;
         NativeMethods.GetExtendedTcpTable(
             IntPtr.Zero, ref size, false,
             NativeMethods.AF_INET,
             TcpTableClass.OwnerPidConnections, 0);
 
-        if (size <= 0) yield break;
+        if (size <= 0) return result;
 
         IntPtr buffer = Marshal.AllocHGlobal(size);
         try
@@ -97,7 +103,7 @@ public sealed class ConnectionEngine : IMonitorEngine
                 NativeMethods.AF_INET,
                 TcpTableClass.OwnerPidConnections, 0);
 
-            if (rc != 0) yield break;
+            if (rc != 0) return result;
 
             int rowCount = Marshal.ReadInt32(buffer);
             int rowSize  = Marshal.SizeOf<MibTcpRowOwnerPid>();
@@ -116,17 +122,19 @@ public sealed class ConnectionEngine : IMonitorEngine
                 int port = ((int)((row.RemotePort & 0xFF) << 8))
                          |  (int)((row.RemotePort & 0xFF00) >> 8);
 
-                yield return new ConnectionRecord(
+                result.Add(new ConnectionRecord(
                     RemoteIp:    remote,
                     RemotePort:  port,
                     Pid:         (int)row.OwningPid,
-                    ProcessName: SafeProcessName((int)row.OwningPid));
+                    ProcessName: SafeProcessName((int)row.OwningPid)));
             }
         }
         finally
         {
             Marshal.FreeHGlobal(buffer);
         }
+
+        return result;
     }
 
     private static bool IsLoopback(string ip)
