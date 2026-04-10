@@ -19,7 +19,11 @@ public sealed class Logger
     {
         _logsDir = logsDir;
         _hostName = Environment.MachineName;
-        Directory.CreateDirectory(_logsDir);
+        // Wrapped in try/catch so a non-writable directory (e.g., Program Files
+        // when the .exe is launched as asInvoker) does not crash the entire
+        // process. The Write method is also try/catch'd, so subsequent writes
+        // simply drop on the floor if the directory cannot be created.
+        try { Directory.CreateDirectory(_logsDir); } catch { }
     }
 
     public void Info (string message)        => Write("INFO",  "monitor", message);

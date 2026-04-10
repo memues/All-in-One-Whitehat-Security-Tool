@@ -687,7 +687,7 @@ public sealed partial class DashboardForm
         };
         page.Controls.Add(subtitle);
 
-        var logsDir = Path.Combine(AppContext.BaseDirectory, "Logs");
+        var logsDir = Paths.LogsDir;
         var today   = DateTime.Now.ToString("yyyy-MM-dd");
         var entries = new (string Title, string FileName, string Desc)[]
         {

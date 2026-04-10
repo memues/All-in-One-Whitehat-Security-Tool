@@ -8,6 +8,11 @@
 //   WhitehatSecurity.exe --uninstall    remove install dir / shortcuts /
 //                                       registry, exit
 //
+// Runtime data (logs, config) is written to whichever directory is
+// writable: next to the .exe for portable use, or %LOCALAPPDATA%\Whitehat
+// Security when running from Program Files (because asInvoker has no write
+// access to Program Files — this was the v7.2.0/v7.2.1 crash bug).
+//
 // On first run from outside the install directory, the .exe shows a small
 // dialog offering to install itself system-wide so it appears in the Windows
 // "Apps & Features" list and can be uninstalled the normal way.
@@ -30,6 +35,30 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // Always wrap the entire entry point so an unhandled exception
+        // surfaces as a MessageBox instead of a silent crash. The v7.2.0
+        // bug was a Logger constructor crash that left zero diagnostic
+        // information for the user; never letting that happen again.
+        try
+        {
+            return MainCore(args);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                MessageBox.Show(
+                    $"Whitehat Security crashed during startup.\n\n{ex.GetType().Name}: {ex.Message}\n\n{ex.StackTrace}",
+                    "Whitehat Security - Fatal",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch { }
+            return 1;
+        }
+    }
+
+    private static int MainCore(string[] args)
+    {
         ApplicationConfiguration.Initialize();
 
         // ── Mode dispatch ───────────────────────────────────────────────
@@ -41,17 +70,9 @@ internal static class Program
         if (install)   return RunInstall(quiet);
         if (uninstall) return RunUninstall(quiet);
 
-        // ── Single-instance mutex (matches Start-Monitoring in PS port) ──
-        using var mutex = new Mutex(initiallyOwned: true, MutexName, out bool createdNew);
-        if (!createdNew)
-        {
-            // Another instance is already running - exit silently.
-            return 0;
-        }
-
         // ── First-run install prompt ────────────────────────────────────
-        // Only when the user is running the .exe from outside the install
-        // dir AND it isn't already installed.
+        // Done BEFORE acquiring the mutex so the launched installed copy
+        // does not race with this process for mutex ownership.
         if (!silent
             && !Installer.IsRunningFromInstallDir()
             && !Installer.IsAlreadyInstalled())
@@ -70,18 +91,40 @@ internal static class Program
             if (answer == DialogResult.Cancel) return 0;
             if (answer == DialogResult.Yes)
             {
-                // Re-launch self elevated with --install. The elevated copy
-                // will install and exit; we then launch the installed binary.
                 var rc = LaunchSelfElevated("--install");
-                if (rc == 0)
+                if (rc != 0)
                 {
-                    var installed = Installer.DefaultInstallExePath;
-                    if (File.Exists(installed))
+                    MessageBox.Show(
+                        rc == -2
+                            ? "Install was cancelled (UAC prompt declined)."
+                            : $"Install failed (exit code {rc}). Check the Windows Application event log for details.",
+                        "Whitehat Security",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return rc;
+                }
+
+                // Install succeeded. Launch the installed copy in --silent
+                // mode so it goes straight to the system tray. We do NOT
+                // hold a single-instance mutex here, so there is no race
+                // for the launched copy to fight against.
+                var installed = Installer.DefaultInstallExePath;
+                if (File.Exists(installed))
+                {
+                    try
                     {
                         Process.Start(new ProcessStartInfo(installed)
                         {
+                            Arguments       = "--silent",
                             UseShellExecute = true,
                         });
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(
+                            $"Installed but could not auto-launch:\n{ex.Message}\n\nLaunch it from the Start Menu.",
+                            "Whitehat Security",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                 }
                 return 0;
@@ -89,20 +132,31 @@ internal static class Program
             // No → fall through and run from current location
         }
 
-        // ── Load config + logger ────────────────────────────────────────
-        var baseDir    = AppContext.BaseDirectory;
-        var configPath = Path.Combine(baseDir, "notification_config.json");
-        var logsDir    = Path.Combine(baseDir, "Logs");
+        // ── Single-instance mutex ───────────────────────────────────────
+        using var mutex = new Mutex(initiallyOwned: true, MutexName, out bool createdNew);
+        if (!createdNew)
+        {
+            // Another instance is already running - exit silently.
+            return 0;
+        }
 
+        // ── Resolve writable data directory ─────────────────────────────
+        // Paths.DataDir falls back to %LOCALAPPDATA%\Whitehat Security
+        // when the .exe lives in a read-only directory like Program Files.
+        var configPath = Paths.ConfigPath;
+        var logsDir    = Paths.LogsDir;
+
+        // ── Load config + logger ────────────────────────────────────────
         var config       = NotifyConfig.LoadOrCreate(configPath);
         var logger       = new Logger(logsDir);
         var consoleSink  = new ConsoleSink();
-        logger.Info($"=== WhitehatSecurity 7.2 (C# port) starting (silent={silent}) ===");
+        logger.Info($"=== WhitehatSecurity {Installer.ProductVersion} starting (silent={silent}) ===");
+        logger.Info($"Exe:         {Environment.ProcessPath}");
+        logger.Info($"Data dir:    {Paths.DataDir}");
         logger.Info($"Config path: {configPath}");
         logger.Info($"Logs dir:    {logsDir}");
-        consoleSink.WriteLine($"Whitehat Security 7.2 starting (silent={silent})");
-        consoleSink.WriteLine($"Config: {configPath}");
-        consoleSink.WriteLine($"Logs:   {logsDir}");
+        consoleSink.WriteLine($"Whitehat Security {Installer.ProductVersion} starting (silent={silent})");
+        consoleSink.WriteLine($"Data dir: {Paths.DataDir}");
 
         // ── Build the monitor host with every engine ────────────────────
         var host = new MonitorHost(config, logger, TimeSpan.FromSeconds(10));
@@ -142,6 +196,8 @@ internal static class Program
     {
         try
         {
+            // Logger writes to %TEMP% during install since we don't yet have
+            // a definitive data dir.
             var logger = new Logger(Path.GetTempPath());
             Installer.InstallElevated(logger);
             if (!quiet)
@@ -155,7 +211,7 @@ internal static class Program
         catch (Exception ex)
         {
             if (!quiet)
-                MessageBox.Show($"Install failed:\n{ex.Message}",
+                MessageBox.Show($"Install failed:\n{ex.GetType().Name}: {ex.Message}",
                     "Whitehat Security",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
@@ -178,7 +234,7 @@ internal static class Program
         catch (Exception ex)
         {
             if (!quiet)
-                MessageBox.Show($"Uninstall failed:\n{ex.Message}",
+                MessageBox.Show($"Uninstall failed:\n{ex.GetType().Name}: {ex.Message}",
                     "Whitehat Security",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
