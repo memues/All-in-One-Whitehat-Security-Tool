@@ -95,7 +95,9 @@ public sealed class NotifyConfig
         RDP                      = true,
         Hosts                    = true,
         ShowThreatDetails        = false,
-        EnableToastNotifications = true,
+        // Toasts are opt-in: a fresh install should be quiet. The user can
+        // enable them from Settings whenever they want the popups back.
+        EnableToastNotifications = false,
         BeepOnAlert              = false,
         FW_DomainProfile         = true,
         FW_PrivateProfile        = true,
