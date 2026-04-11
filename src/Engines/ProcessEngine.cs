@@ -76,17 +76,38 @@ public sealed class ProcessEngine : IMonitorEngine
                     }
                 }
 
-                if (!IsAuthenticodeSigned(exePath))
+                bool signed = IsAuthenticodeSigned(exePath);
+
+                // Decision matrix:
+                //   unsigned + suspicious path → CRIT (probable malware drop)
+                //   unsigned anywhere          → HIGH
+                //   signed + suspicious path   → MED  (legit-looking installer
+                //                                       running from Downloads)
+                //   signed everywhere else     → no alert (too noisy)
+                //
+                // The signed-suspicious-path case is why v7.3.x users saw
+                // zero Process alerts in normal use: most modern apps are
+                // signed, so the unsigned-only branch never fired. Adding
+                // the suspicious-path branch catches "user just downloaded
+                // and ran an installer" without flooding the dashboard
+                // every time a system service starts.
+                if (!signed && inSuspiciousPath)
                 {
-                    alerts.Add(new Alert(
-                        Timestamp:   DateTime.Now,
-                        Category:    "Process",
-                        Title:       inSuspiciousPath ? "UNSIGNED PROCESS IN SUSPICIOUS LOCATION" : "UNSIGNED NEW PROCESS",
-                        Message:     $"{p.ProcessName} (PID {p.Id})",
-                        Severity:    inSuspiciousPath ? AlertSeverity.High : AlertSeverity.Med,
-                        ProcessName: p.ProcessName,
-                        ProcessId:   p.Id,
-                        Path:        exePath));
+                    alerts.Add(MakeAlert(p, exePath,
+                        "UNSIGNED PROCESS IN SUSPICIOUS LOCATION",
+                        AlertSeverity.Crit));
+                }
+                else if (!signed)
+                {
+                    alerts.Add(MakeAlert(p, exePath,
+                        "UNSIGNED NEW PROCESS",
+                        AlertSeverity.High));
+                }
+                else if (inSuspiciousPath)
+                {
+                    alerts.Add(MakeAlert(p, exePath,
+                        "PROCESS LAUNCHED FROM DOWNLOAD/TEMP FOLDER",
+                        AlertSeverity.Med));
                 }
             }
         }
@@ -99,6 +120,22 @@ public sealed class ProcessEngine : IMonitorEngine
 
         return alerts;
     }
+
+    /// <summary>
+    /// Builds a Process-category Alert with the common fields populated.
+    /// Used by the three branches in the decision matrix above so the
+    /// matrix stays compact.
+    /// </summary>
+    private static Alert MakeAlert(Process p, string exePath, string title, AlertSeverity sev)
+        => new(
+            Timestamp:   DateTime.Now,
+            Category:    "Process",
+            Title:       title,
+            Message:     $"{p.ProcessName} (PID {p.Id})  {exePath}",
+            Severity:    sev,
+            ProcessName: p.ProcessName,
+            ProcessId:   p.Id,
+            Path:        exePath);
 
     /// <summary>
     /// Best-effort Authenticode signature check using

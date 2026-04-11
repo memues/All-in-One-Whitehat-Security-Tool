@@ -43,7 +43,45 @@ public sealed class MemoryScannerEngine : IMonitorEngine
     /// <summary>PIDs we already alerted on (one alert per process per session).</summary>
     private readonly HashSet<int> _alerted = new();
 
-    public void Initialize() { /* no baseline phase */ }
+    /// <summary>
+    /// Baseline RWX processes captured at Initialize. Anything in here
+    /// existed before the monitor started and is therefore not "new" — we
+    /// stay quiet about it. Without this, the very first Scan tick would
+    /// flood the dashboard with one alert per existing svchost / dwm /
+    /// RuntimeBroker / etc., which is the v7.3.x bug the user reported as
+    /// "I only see Memory alerts, the others do not work".
+    /// </summary>
+    private readonly HashSet<int> _baselineRwx = new();
+
+    public void Initialize()
+    {
+        // Walk every running process and remember which ones already have
+        // RWX private memory at startup. This is the same scan logic the
+        // tick path uses; we just record results in _baselineRwx instead
+        // of generating alerts.
+        Process[] procs;
+        try { procs = Process.GetProcesses(); }
+        catch { return; }
+
+        try
+        {
+            foreach (var p in procs)
+            {
+                if (p.Id <= 4) continue;
+                if (JitAllowlist.Contains(p.ProcessName)) continue;
+                try
+                {
+                    if (TryGetSuspiciousRegion(p.Id, out _))
+                        _baselineRwx.Add(p.Id);
+                }
+                catch { /* probe failure on a single process is fine */ }
+            }
+        }
+        finally
+        {
+            foreach (var p in procs) p.Dispose();
+        }
+    }
 
     public IEnumerable<Alert> Scan()
     {
@@ -60,6 +98,9 @@ public sealed class MemoryScannerEngine : IMonitorEngine
                 if (p.Id <= 4) continue;
                 if (JitAllowlist.Contains(p.ProcessName)) continue;
                 if (_alerted.Contains(p.Id)) continue;
+                // Skip processes that already had RWX memory at startup —
+                // they are part of the baseline, not a new injection.
+                if (_baselineRwx.Contains(p.Id)) continue;
 
                 if (TryGetSuspiciousRegion(p.Id, out var region))
                 {
