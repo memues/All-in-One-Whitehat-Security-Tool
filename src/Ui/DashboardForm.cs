@@ -22,6 +22,13 @@ public sealed partial class DashboardForm : Form
     private readonly DashboardSink _sink;
     private readonly ConsoleSink   _consoleSink;
     private readonly string        _configPath;
+    /// <summary>
+    /// Live MonitorHost instance — used by the AI Threats page so a Scan
+    /// Now click reuses the engines that already hold a baseline (instead
+    /// of creating fresh ones every click, which produced spurious
+    /// "every running process is suspicious" floods in v7.3.4).
+    /// </summary>
+    private readonly MonitorHost   _host;
 
     // Static layout pieces from the Designer file --------------------------
     private readonly ListView _alertsList   = new();
@@ -39,6 +46,7 @@ public sealed partial class DashboardForm : Form
     private readonly ComboBox _alertCategoryFilter = new();
     private readonly Button   _btnExportCsv    = new();
     private readonly Button   _btnExportJson   = new();
+    private readonly Button   _btnClearAlerts  = new();
     /// <summary>
     /// Master list of every alert ever received in this dashboard session.
     /// The visible ListView is rebuilt from this whenever a filter changes,
@@ -49,6 +57,8 @@ public sealed partial class DashboardForm : Form
     private int  _alertsSortColumn = 0;
     private bool _alertsSortAsc    = false;
     private readonly RichTextBox _consoleBox = new();
+    private readonly CheckBox    _consoleAutoScroll   = new();
+    private readonly Label       _consoleDroppedLabel = new();
     private readonly ListView _recentList     = new();
 
     // Stat card value labels — assigned by BuildStatusPage in the Designer.
@@ -64,18 +74,31 @@ public sealed partial class DashboardForm : Form
     private readonly Label    _aiStatusLabel = new();
     private Alert? _selectedAlert;
 
+    /// <summary>
+    /// Status-page refresh timer. Stored in a field so FormClosed can stop
+    /// AND dispose it. Without dispose, every dashboard open/close cycle
+    /// leaks one Timer + the underlying Win32 timer handle, and after ~20
+    /// cycles the form gets noticeably laggy as the leaked timers fight
+    /// for the UI thread.
+    /// </summary>
+    private System.Windows.Forms.Timer? _statusTimer;
+    /// <summary>One-shot 500 ms timer that kicks the first posture refresh.</summary>
+    private System.Windows.Forms.Timer? _firstPostureKick;
+
     public DashboardForm(
         NotifyConfig  config,
         Logger        logger,
         DashboardSink sink,
         ConsoleSink   consoleSink,
-        string        configPath)
+        string        configPath,
+        MonitorHost   host)
     {
         _config      = config;
         _logger      = logger;
         _sink        = sink;
         _consoleSink = consoleSink;
         _configPath  = configPath;
+        _host        = host;
 
         InitializeComponent();
         PopulateAlertsBacklog();
@@ -102,31 +125,44 @@ public sealed partial class DashboardForm : Form
         // The first posture refresh kicks off ~500 ms after the dashboard
         // appears (still on a background thread) so the dots populate
         // shortly after open without blocking the form constructor.
-        var statusTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _statusTimer = new System.Windows.Forms.Timer { Interval = 2000 };
         int postureTickCounter = 0;
-        statusTimer.Tick += (_, _) =>
+        _statusTimer.Tick += (_, _) =>
         {
             RefreshStatusPage();
             postureTickCounter++;
             if (postureTickCounter % 5 == 0)
                 BeginRefreshPostureIndicators();
         };
-        statusTimer.Start();
+        _statusTimer.Start();
 
         // First posture refresh — fires after ~500 ms on a background
         // thread so the dashboard appears immediately and the dots populate
         // on next paint instead of blocking the form constructor on 8 WMI
         // queries (each ~200-500 ms = ~3-4 s of total UI freeze in v7.3.0).
-        var firstPostureKick = new System.Windows.Forms.Timer { Interval = 500 };
-        firstPostureKick.Tick += (_, _) =>
+        _firstPostureKick = new System.Windows.Forms.Timer { Interval = 500 };
+        _firstPostureKick.Tick += (_, _) =>
         {
-            firstPostureKick.Stop();
-            firstPostureKick.Dispose();
+            _firstPostureKick?.Stop();
+            _firstPostureKick?.Dispose();
+            _firstPostureKick = null;
             BeginRefreshPostureIndicators();
         };
-        firstPostureKick.Start();
+        _firstPostureKick.Start();
 
-        FormClosed += (_, _) => statusTimer.Stop();
+        // Final cleanup — stop AND dispose both timers so the form releases
+        // every Win32 timer handle on close. Stop alone leaves the timer
+        // queued in the WinForms message pump which leaks across open/close
+        // cycles.
+        FormClosed += (_, _) =>
+        {
+            _statusTimer?.Stop();
+            _statusTimer?.Dispose();
+            _statusTimer = null;
+            _firstPostureKick?.Stop();
+            _firstPostureKick?.Dispose();
+            _firstPostureKick = null;
+        };
     }
 
     /// <summary>
@@ -205,11 +241,10 @@ public sealed partial class DashboardForm : Form
 
     private void PopulateAlertsBacklog()
     {
-        // Snapshot under the lock so a concurrent Receive() call cannot
-        // mutate the list mid-enumeration.
-        Alert[] snapshot;
-        lock (_sink) snapshot = _sink.All.ToArray();
-        foreach (var a in snapshot) AppendAlertRow(a);
+        // _sink.All already returns a snapshot under DashboardSink's
+        // internal lock, so we can enumerate it directly without taking
+        // an external lock on the sink.
+        foreach (var a in _sink.All) AppendAlertRow(a);
     }
 
     /// <summary>
@@ -290,12 +325,17 @@ public sealed partial class DashboardForm : Form
             _alertsSortAsc = true;
         }
         var items = _alertsList.Items.Cast<ListViewItem>().ToList();
+        int sortCol = _alertsSortColumn;
         items.Sort((x, y) =>
         {
-            int cmp = string.Compare(
-                x.SubItems[_alertsSortColumn].Text,
-                y.SubItems[_alertsSortColumn].Text,
-                StringComparison.OrdinalIgnoreCase);
+            // Bounds check — if either row has fewer subitems than the
+            // requested column, treat its value as empty rather than
+            // throwing IndexOutOfRangeException. Without this, clicking
+            // a header before any rows are populated could crash the
+            // dashboard the first time a user changes sort.
+            string xs = sortCol < x.SubItems.Count ? x.SubItems[sortCol].Text : "";
+            string ys = sortCol < y.SubItems.Count ? y.SubItems[sortCol].Text : "";
+            int cmp = string.Compare(xs, ys, StringComparison.OrdinalIgnoreCase);
             return _alertsSortAsc ? cmp : -cmp;
         });
         _alertsList.BeginUpdate();
@@ -345,6 +385,75 @@ public sealed partial class DashboardForm : Form
         return s;
     }
 
+    private void OnClearAlertsClick(object? sender, EventArgs e)
+    {
+        if (_allAlerts.Count == 0) return;
+        var ans = MessageBox.Show(
+            $"Clear all {_allAlerts.Count} alerts from the dashboard?\n\n" +
+            "This only empties the in-memory list — the daily alert log on\n" +
+            "disk is not touched.",
+            "Clear All Alerts",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (ans != DialogResult.Yes) return;
+
+        _allAlerts.Clear();
+        _alertsList.BeginUpdate();
+        try { _alertsList.Items.Clear(); }
+        finally { _alertsList.EndUpdate(); }
+        _recentList.Items.Clear();
+        ClearAlertDetail();
+    }
+
+    private void OnAlertContextMenuOpening(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        // Hide every action item, then re-show the ones that apply to the
+        // currently-selected alert. Cancel the menu entirely if nothing is
+        // selected so the user doesn't see an empty popup.
+        if (_alertsList.SelectedItems.Count == 0 || _alertsList.SelectedItems[0].Tag is not Alert a)
+        {
+            e.Cancel = true;
+            return;
+        }
+        if (_alertContextMenu is null) { e.Cancel = true; return; }
+        _ctxBlockIp.Visible    = a.RemoteIp is not null;
+        _ctxIpLookup.Visible   = a.RemoteIp is not null;
+        _ctxKill.Visible       = a.ProcessId is int pid && pid > 0;
+        _ctxOpenLog.Visible    = a.Path is not null && File.Exists(a.Path);
+        _ctxRegedit.Visible    = a.Category == "Registry";
+    }
+
+    private void OnAlertCopyRowClick(object? sender, EventArgs e)
+    {
+        if (_alertsList.SelectedItems.Count == 0) return;
+        var item = _alertsList.SelectedItems[0];
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < item.SubItems.Count; i++)
+        {
+            if (i > 0) sb.Append('\t');
+            sb.Append(item.SubItems[i].Text);
+        }
+        try { Clipboard.SetText(sb.ToString()); } catch { }
+    }
+
+    private void OnAlertCopyMessageClick(object? sender, EventArgs e)
+    {
+        if (_alertsList.SelectedItems.Count == 0) return;
+        if (_alertsList.SelectedItems[0].Tag is Alert a)
+        {
+            try { Clipboard.SetText(a.Message ?? ""); } catch { }
+        }
+    }
+
+    // Right-click context menu controls — built in the Designer file.
+    private ContextMenuStrip? _alertContextMenu;
+    private ToolStripMenuItem _ctxCopyRow     = new() { Text = "Copy row" };
+    private ToolStripMenuItem _ctxCopyMessage = new() { Text = "Copy message" };
+    private ToolStripMenuItem _ctxIpLookup    = new() { Text = "IP lookup" };
+    private ToolStripMenuItem _ctxBlockIp     = new() { Text = "Block IP" };
+    private ToolStripMenuItem _ctxKill        = new() { Text = "Kill process" };
+    private ToolStripMenuItem _ctxOpenLog     = new() { Text = "Open log file" };
+    private ToolStripMenuItem _ctxRegedit     = new() { Text = "Open in regedit" };
+
     private void OnExportJsonClick(object? sender, EventArgs e)
     {
         try
@@ -369,52 +478,79 @@ public sealed partial class DashboardForm : Form
     }
 
     /// <summary>
-    /// AI Threats "Scan Now" button. Runs the three on-demand engines once
-    /// (HiddenProcess, MemoryScanner, BYOVD) and dumps every finding into
-    /// the AI Threats list view. Each engine is in try/catch so a probe
-    /// failure on one cannot abort the others.
+    /// Cancellation source for the in-flight AI scan, if any. Stored on
+    /// the form so the Cancel button can fire it from the UI thread.
     /// </summary>
-    private void OnAiScanClick(object? sender, EventArgs e)
+    private System.Threading.CancellationTokenSource? _aiScanCts;
+
+    /// <summary>
+    /// AI Threats "Scan Now" button. Runs the three on-demand engines via
+    /// MonitorHost.RunOneShotAsync against the LIVE engine instances that
+    /// already hold a baseline — this avoids the v7.3.4 bug where every
+    /// click recreated MemoryScannerEngine without a baseline and flooded
+    /// the dashboard with one alert per running RWX-using process.
+    /// </summary>
+    private async void OnAiScanClick(object? sender, EventArgs e)
     {
-        _aiResultsList.Items.Clear();
-        _aiStatusLabel.Text = "Scanning...";
-        _aiStatusLabel.ForeColor = Theme.Orange;
-        Application.DoEvents();
-
-        int total = 0;
-        var engines = new (string Name, Engines.IMonitorEngine Eng)[]
+        // If a scan is already running, the click acts as Cancel.
+        if (_aiScanCts is not null)
         {
-            ("HiddenProcess", new Engines.HiddenProcessEngine()),
-            ("Memory",        new Engines.MemoryScannerEngine()),
-            ("BYOVD",         new Engines.ByovdEngine()),
-        };
-
-        foreach (var (name, eng) in engines)
-        {
-            try
-            {
-                eng.Initialize();
-                foreach (var a in eng.Scan())
-                {
-                    var item = new ListViewItem(name);
-                    item.SubItems.Add(a.Severity.ToString().ToUpperInvariant());
-                    item.SubItems.Add(a.Title);
-                    item.SubItems.Add(a.Message);
-                    item.ForeColor = Theme.SeverityColor(a.Severity);
-                    _aiResultsList.Items.Add(item);
-                    total++;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Error($"AI scan {name} failed: {ex.Message}");
-            }
+            try { _aiScanCts.Cancel(); } catch { }
+            return;
         }
 
-        _aiStatusLabel.Text = total == 0
-            ? "Scan complete: 0 findings."
-            : $"Scan complete: {total} findings.";
-        _aiStatusLabel.ForeColor = total == 0 ? Theme.Green : Theme.Red;
+        _aiResultsList.Items.Clear();
+        _aiStatusLabel.Text      = "Scanning...";
+        _aiStatusLabel.ForeColor = Theme.Orange;
+
+        _aiScanCts = new System.Threading.CancellationTokenSource();
+        var ct     = _aiScanCts.Token;
+
+        try
+        {
+            // Reuse the live MonitorHost engines (HiddenProcess, Memory,
+            // BYOVD) so the scan honours each engine's baseline.
+            var results = await _host.RunOneShotAsync(
+                new[] { "HiddenProcess", "Memory", "BYOVD" }, ct);
+
+            if (ct.IsCancellationRequested)
+            {
+                _aiStatusLabel.Text      = "Scan cancelled.";
+                _aiStatusLabel.ForeColor = Theme.TextDim;
+                return;
+            }
+
+            foreach (var a in results)
+            {
+                var item = new ListViewItem(a.Category);
+                item.SubItems.Add(a.Severity.ToString().ToUpperInvariant());
+                item.SubItems.Add(a.Title);
+                item.SubItems.Add(a.Message);
+                item.ForeColor = Theme.SeverityColor(a.Severity);
+                _aiResultsList.Items.Add(item);
+            }
+
+            _aiStatusLabel.Text = results.Count == 0
+                ? "Scan complete: 0 findings."
+                : $"Scan complete: {results.Count} findings.";
+            _aiStatusLabel.ForeColor = results.Count == 0 ? Theme.Green : Theme.Red;
+        }
+        catch (OperationCanceledException)
+        {
+            _aiStatusLabel.Text      = "Scan cancelled.";
+            _aiStatusLabel.ForeColor = Theme.TextDim;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"AI scan failed: {ex.Message}");
+            _aiStatusLabel.Text      = $"Scan failed: {ex.Message}";
+            _aiStatusLabel.ForeColor = Theme.Red;
+        }
+        finally
+        {
+            try { _aiScanCts?.Dispose(); } catch { }
+            _aiScanCts = null;
+        }
     }
 
     private void OnRestoreRegistryClick(object? sender, EventArgs e)
@@ -749,9 +885,175 @@ public sealed partial class DashboardForm : Form
         }
         else
         {
-            // revert visual state
+            // Revert visual state — user denied UAC, the helper failed,
+            // or the elevated script returned non-zero.
             cb.CheckedChanged -= OnSettingsCheckChanged;
             cb.Checked = !cb.Checked;
+            cb.CheckedChanged += OnSettingsCheckChanged;
+
+            // Surface the failure so the user understands why the toggle
+            // bounced back. Previous versions reverted silently, which made
+            // it look like the checkbox was simply broken.
+            string reason = rc switch
+            {
+                -2 => "the elevated PowerShell timed out (30 s limit).",
+                -3 => "the elevation request failed (UAC declined or system error).",
+                -4 => "the input value was empty or invalid.",
+                -5 => "the input value was rejected as unsafe.",
+                _  => $"the elevated script exited with code {rc}.",
+            };
+            MessageBox.Show(
+                $"Could not apply '{cb.Tag}': {reason}\n\nThe checkbox has been reverted.",
+                "Whitehat Security",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    //  Settings page action buttons (Reset / Export / Import)
+    // -----------------------------------------------------------------------
+
+    private void OnResetSettingsClick(object? sender, EventArgs e)
+    {
+        var ans = MessageBox.Show(
+            "Reset every setting to its default value?\n\n" +
+            "This only updates the local config file — privileged actions\n" +
+            "(firewall rules, hosts blocklists, DoH endpoints) keep their\n" +
+            "current state until you toggle them again.",
+            "Reset Settings",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (ans != DialogResult.Yes) return;
+
+        var fresh = NotifyConfig.Defaults();
+        // Mutate _config in place so every other UI element that holds a
+        // reference (the toast notifier, the alert gate via MonitorHost)
+        // observes the new values immediately.
+        CopyConfig(fresh, _config);
+        SaveConfigSafe();
+        ApplyConfigToSettingsCheckboxes();
+    }
+
+    private void OnExportSettingsClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            using var dlg = new SaveFileDialog
+            {
+                Filter   = "JSON (*.json)|*.json|All files (*.*)|*.*",
+                FileName = $"WhitehatSecurity_Config_{DateTime.Now:yyyyMMdd_HHmmss}.json",
+            };
+            if (dlg.ShowDialog() != DialogResult.OK) return;
+            _config.Save(dlg.FileName);
+            MessageBox.Show("Settings exported.", "Export",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex) { _logger.Error($"Export settings: {ex.Message}"); }
+    }
+
+    private void OnImportSettingsClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            using var dlg = new OpenFileDialog
+            {
+                Filter = "JSON (*.json)|*.json|All files (*.*)|*.*",
+            };
+            if (dlg.ShowDialog() != DialogResult.OK) return;
+            var loaded = NotifyConfig.LoadOrCreate(dlg.FileName);
+            CopyConfig(loaded, _config);
+            SaveConfigSafe();
+            ApplyConfigToSettingsCheckboxes();
+            MessageBox.Show("Settings imported.", "Import",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"Import settings: {ex.Message}");
+            MessageBox.Show($"Import failed: {ex.Message}", "Import",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>
+    /// Copy every settable property from <paramref name="src"/> into
+    /// <paramref name="dst"/>. Used by the Reset / Import paths so the
+    /// existing _config reference (held by sinks, gates, etc.) is updated
+    /// in place rather than replaced.
+    /// </summary>
+    private static void CopyConfig(NotifyConfig src, NotifyConfig dst)
+    {
+        dst.SchemaVersion            = src.SchemaVersion;
+        dst.Firmware                 = src.Firmware;
+        dst.Driver                   = src.Driver;
+        dst.Service                  = src.Service;
+        dst.Connection               = src.Connection;
+        dst.Process                  = src.Process;
+        dst.Listener                 = src.Listener;
+        dst.Registry                 = src.Registry;
+        dst.Security                 = src.Security;
+        dst.RDP                      = src.RDP;
+        dst.Hosts                    = src.Hosts;
+        dst.ShowThreatDetails        = src.ShowThreatDetails;
+        dst.EnableToastNotifications = src.EnableToastNotifications;
+        dst.BeepOnAlert              = src.BeepOnAlert;
+        dst.FW_DomainProfile         = src.FW_DomainProfile;
+        dst.FW_PrivateProfile        = src.FW_PrivateProfile;
+        dst.FW_PublicProfile         = src.FW_PublicProfile;
+        dst.FW_BlockInbound          = src.FW_BlockInbound;
+        dst.FW_BlockOutbound         = src.FW_BlockOutbound;
+        dst.FW_BlockPing             = src.FW_BlockPing;
+        dst.FW_BlockLAN              = src.FW_BlockLAN;
+        dst.FW_BlockDevices          = src.FW_BlockDevices;
+        dst.PF_BlockTrackers         = src.PF_BlockTrackers;
+        dst.PF_BlockMalware          = src.PF_BlockMalware;
+        dst.PF_BlockTelemetry        = src.PF_BlockTelemetry;
+        dst.PF_BlockDNSBypass        = src.PF_BlockDNSBypass;
+        dst.DNS_Provider             = src.DNS_Provider;
+        dst.DNS_DoH                  = src.DNS_DoH;
+    }
+
+    /// <summary>
+    /// Re-sync every Settings checkbox from the live _config object.
+    /// Used after Reset / Import so the visible state reflects the new
+    /// values without needing to rebuild the page.
+    /// </summary>
+    private void ApplyConfigToSettingsCheckboxes()
+    {
+        foreach (var (key, cb) in _settingsCheckboxes)
+        {
+            // Detach + reattach so the assignment doesn't fire the change
+            // handler (which would try to re-run any privileged side effect).
+            cb.CheckedChanged -= OnSettingsCheckChanged;
+            cb.Checked = key switch
+            {
+                "Firmware"                 => _config.Firmware,
+                "Driver"                   => _config.Driver,
+                "Service"                  => _config.Service,
+                "Connection"               => _config.Connection,
+                "Process"                  => _config.Process,
+                "Listener"                 => _config.Listener,
+                "Registry"                 => _config.Registry,
+                "Security"                 => _config.Security,
+                "RDP"                      => _config.RDP,
+                "Hosts"                    => _config.Hosts,
+                "ShowThreatDetails"        => _config.ShowThreatDetails,
+                "EnableToastNotifications" => _config.EnableToastNotifications,
+                "BeepOnAlert"              => _config.BeepOnAlert,
+                "FW_DomainProfile"         => _config.FW_DomainProfile,
+                "FW_PrivateProfile"        => _config.FW_PrivateProfile,
+                "FW_PublicProfile"         => _config.FW_PublicProfile,
+                "FW_BlockInbound"          => _config.FW_BlockInbound,
+                "FW_BlockOutbound"         => _config.FW_BlockOutbound,
+                "FW_BlockPing"             => _config.FW_BlockPing,
+                "FW_BlockLAN"              => _config.FW_BlockLAN,
+                "FW_BlockDevices"          => _config.FW_BlockDevices,
+                "PF_BlockTrackers"         => _config.PF_BlockTrackers,
+                "PF_BlockMalware"          => _config.PF_BlockMalware,
+                "PF_BlockTelemetry"        => _config.PF_BlockTelemetry,
+                "PF_BlockDNSBypass"        => _config.PF_BlockDNSBypass,
+                "DNS_DoH"                  => _config.DNS_DoH,
+                _                          => cb.Checked,
+            };
             cb.CheckedChanged += OnSettingsCheckChanged;
         }
     }
@@ -787,7 +1089,9 @@ public sealed partial class DashboardForm : Form
     {
         try
         {
-            _alertCountValue.Text = _sink.All.Count.ToString();
+            // _sink.Count is O(1) and lock-cheap; _sink.All would allocate
+            // a snapshot array on every status refresh.
+            _alertCountValue.Text = _sink.Count.ToString();
 
             // Only re-query the heavy counters every ~6 s. The 2 s timer
             // tick still updates uptime + alert count cheaply.
@@ -818,7 +1122,11 @@ public sealed partial class DashboardForm : Form
             }
             _procCountValue.Text = _cachedProcessCount.ToString();
 
-            var up = TimeSpan.FromMilliseconds(Environment.TickCount64);
+            // Uptime is "time since this WhitehatSecurity process started",
+            // not "time since boot". Environment.TickCount64 was wrong; use
+            // the captured start time so the value matches the Started:
+            // line in the info row.
+            var up = DateTime.Now - Program.StartedAt;
             _uptimeValue.Text = $"{(int)up.TotalHours:D2}:{up.Minutes:D2}";
         }
         catch
@@ -845,13 +1153,68 @@ public sealed partial class DashboardForm : Form
 
     private void AppendConsoleLine(string line)
     {
+        // Pick a colour based on the level marker so the user can scan
+        // for warnings / errors / alerts visually instead of reading
+        // every line.
+        var colour = _consoleBox.ForeColor;
+        if      (line.Contains("[ERROR]")) colour = Theme.Red;
+        else if (line.Contains("[WARN]"))  colour = Theme.Orange;
+        else if (line.Contains("[ALERT]")) colour = Theme.SevCrit;
+        else if (line.Contains("[INFO]"))  colour = Theme.Green;
+
+        int selStartBefore = _consoleBox.SelectionStart;
+        int selLenBefore   = _consoleBox.SelectionLength;
+
+        _consoleBox.SelectionStart  = _consoleBox.TextLength;
+        _consoleBox.SelectionLength = 0;
+        _consoleBox.SelectionColor  = colour;
         _consoleBox.AppendText(line + Environment.NewLine);
-        _consoleBox.SelectionStart = _consoleBox.TextLength;
-        _consoleBox.ScrollToCaret();
+        _consoleBox.SelectionColor  = _consoleBox.ForeColor;
+
+        if (_consoleAutoScroll.Checked)
+        {
+            _consoleBox.SelectionStart = _consoleBox.TextLength;
+            _consoleBox.ScrollToCaret();
+        }
+        else
+        {
+            // Restore the user's caret position so the view doesn't yank.
+            _consoleBox.SelectionStart  = selStartBefore;
+            _consoleBox.SelectionLength = selLenBefore;
+        }
+
+        // Update the dropped-line counter so the user can see when the
+        // ring buffer started evicting older lines.
+        try
+        {
+            int dropped = _consoleSink.LinesDropped;
+            _consoleDroppedLabel.Text = dropped > 0
+                ? $"({dropped} line{(dropped == 1 ? "" : "s")} dropped — buffer full)"
+                : "";
+        }
+        catch { }
     }
 
     private void OnClearConsoleClick(object? sender, EventArgs e)
-        => _consoleBox.Clear();
+    {
+        _consoleBox.Clear();
+        _consoleDroppedLabel.Text = "";
+    }
+
+    private void OnSaveConsoleClick(object? sender, EventArgs e)
+    {
+        try
+        {
+            using var dlg = new SaveFileDialog
+            {
+                Filter   = "Text (*.txt)|*.txt|All files (*.*)|*.*",
+                FileName = $"WhitehatSecurity_Console_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
+            };
+            if (dlg.ShowDialog() != DialogResult.OK) return;
+            File.WriteAllText(dlg.FileName, _consoleBox.Text);
+        }
+        catch (Exception ex) { _logger.Error($"Save console: {ex.Message}"); }
+    }
 
     // -----------------------------------------------------------------------
     //  Logs page file-card click handlers

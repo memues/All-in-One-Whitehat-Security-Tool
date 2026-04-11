@@ -62,29 +62,40 @@ public sealed class DriverEngine : IMonitorEngine
 
     private readonly record struct DriverRecord(string Name, string PathAt);
 
-    private static IEnumerable<DriverRecord> EnumerateDrivers()
+    private static List<DriverRecord> EnumerateDrivers()
     {
         // Win32_SystemDriver returns kernel-mode drivers (Service Type = 1 or 2)
         // — same set Get-WmiObject Win32_SystemDriver returns in PowerShell.
-        ManagementObjectCollection? results;
+        //
+        // CRITICAL: the ManagementObjectCollection returned by searcher.Get()
+        // is tied to the lifetime of the searcher. Iterating it after the
+        // using block has disposed the searcher would crash with a COM
+        // access violation. Materialize the records into a List INSIDE the
+        // using block so the iterator finishes before the searcher is freed.
+        // Each ManagementObject is disposed in a finally so we never leak
+        // the underlying COM reference even if a property read throws.
+        var records = new List<DriverRecord>();
         try
         {
             using var searcher = new ManagementObjectSearcher(
                 "SELECT Name, PathName FROM Win32_SystemDriver");
-            results = searcher.Get();
+            using var results = searcher.Get();
+            foreach (ManagementObject mo in results)
+            {
+                try
+                {
+                    string? name = mo["Name"]?.ToString();
+                    string? path = mo["PathName"]?.ToString();
+                    if (string.IsNullOrEmpty(name)) continue;
+                    records.Add(new DriverRecord(name!, path ?? ""));
+                }
+                finally { mo.Dispose(); }
+            }
         }
         catch
         {
-            yield break;
+            // WMI failure — return whatever we already collected.
         }
-
-        foreach (ManagementObject mo in results)
-        {
-            string? name = mo["Name"]?.ToString();
-            string? path = mo["PathName"]?.ToString();
-            if (string.IsNullOrEmpty(name)) continue;
-            yield return new DriverRecord(name!, path ?? "");
-            mo.Dispose();
-        }
+        return records;
     }
 }

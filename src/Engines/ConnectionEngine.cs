@@ -19,10 +19,17 @@ public sealed class ConnectionEngine : IMonitorEngine
     public string Name => "Connections";
 
     /// <summary>
-    /// Set of "remoteIP|pid" keys we've already seen. New entries → Alert.
-    /// Trimmed periodically to keep memory bounded.
+    /// Hard cap on the number of distinct connection keys we remember. On
+    /// a server with high churn this set could otherwise grow to hundreds
+    /// of MB over a few weeks. When the cap is reached we evict the
+    /// oldest entries via the FIFO order tracked in _knownOrder.
     /// </summary>
+    private const int MaxKnown = 10_000;
+
+    /// <summary>"remoteIP|pid" keys we have already alerted on.</summary>
     private readonly HashSet<string> _known = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>FIFO insertion order, parallel to _known, for cheap eviction.</summary>
+    private readonly Queue<string>   _knownOrder = new();
 
     private static readonly HashSet<string> LoopbackPrefixes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -32,7 +39,7 @@ public sealed class ConnectionEngine : IMonitorEngine
     public void Initialize()
     {
         foreach (var conn in EnumerateConnections())
-            _known.Add(Key(conn));
+            AddKnown(Key(conn));
     }
 
     public IEnumerable<Alert> Scan()
@@ -40,7 +47,7 @@ public sealed class ConnectionEngine : IMonitorEngine
         foreach (var conn in EnumerateConnections())
         {
             var key = Key(conn);
-            if (_known.Add(key))
+            if (AddKnown(key))
             {
                 yield return new Alert(
                     Timestamp:   DateTime.Now,
@@ -54,6 +61,23 @@ public sealed class ConnectionEngine : IMonitorEngine
                     RemotePort:  conn.RemotePort);
             }
         }
+    }
+
+    /// <summary>
+    /// Add a key to the known set. Returns true if it was new (i.e. the
+    /// caller should raise an alert). Evicts the oldest entry when the
+    /// set hits MaxKnown so memory stays bounded.
+    /// </summary>
+    private bool AddKnown(string key)
+    {
+        if (!_known.Add(key)) return false;
+        _knownOrder.Enqueue(key);
+        while (_knownOrder.Count > MaxKnown)
+        {
+            var stale = _knownOrder.Dequeue();
+            _known.Remove(stale);
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------------
@@ -147,7 +171,17 @@ public sealed class ConnectionEngine : IMonitorEngine
 
     private static string? SafeProcessName(int pid)
     {
-        try { return Process.GetProcessById(pid).ProcessName; }
+        // Wrap in `using` so the kernel handle Process.GetProcessById opens
+        // is released on every call. Without this, every TCP table scan
+        // (every few seconds) leaked one process handle per connection,
+        // which on a busy system exhausted the handle table within a day
+        // and caused subsequent GetProcessById calls to fail with
+        // "Access denied" or eventually OOM the host.
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return p.ProcessName;
+        }
         catch { return null; }
     }
 }

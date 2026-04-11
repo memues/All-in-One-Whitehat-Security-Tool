@@ -66,41 +66,43 @@ public sealed class ByovdEngine : IMonitorEngine
     {
         var alerts = new List<Alert>();
 
-        ManagementObjectCollection? results;
+        // CRITICAL: keep the foreach INSIDE the using block. The collection
+        // returned by searcher.Get() is tied to the searcher's lifetime;
+        // iterating it after the searcher is disposed would crash with a
+        // COM access violation. (See DriverEngine for the matching fix.)
         try
         {
             using var searcher = new ManagementObjectSearcher(
                 "SELECT Name, PathName FROM Win32_SystemDriver WHERE State = 'Running'");
-            results = searcher.Get();
+            using var results = searcher.Get();
+            foreach (ManagementObject mo in results)
+            {
+                try
+                {
+                    var path = mo["PathName"]?.ToString() ?? "";
+                    var fileName = Path.GetFileName(path);
+                    if (string.IsNullOrEmpty(fileName)) continue;
+
+                    if (Catalogue.Contains(fileName) && _alerted.Add(fileName))
+                    {
+                        alerts.Add(new Alert(
+                            Timestamp: DateTime.Now,
+                            Category:  "BYOVD",
+                            Title:     "VULNERABLE DRIVER LOADED",
+                            Message:   $"{fileName} is a known-vulnerable signed driver ({path})",
+                            Severity:  AlertSeverity.High,
+                            Path:      path));
+                    }
+                }
+                finally
+                {
+                    mo.Dispose();
+                }
+            }
         }
         catch
         {
-            return alerts;
-        }
-
-        foreach (ManagementObject mo in results)
-        {
-            try
-            {
-                var path = mo["PathName"]?.ToString() ?? "";
-                var fileName = Path.GetFileName(path);
-                if (string.IsNullOrEmpty(fileName)) continue;
-
-                if (Catalogue.Contains(fileName) && _alerted.Add(fileName))
-                {
-                    alerts.Add(new Alert(
-                        Timestamp: DateTime.Now,
-                        Category:  "BYOVD",
-                        Title:     "VULNERABLE DRIVER LOADED",
-                        Message:   $"{fileName} is a known-vulnerable signed driver ({path})",
-                        Severity:  AlertSeverity.High,
-                        Path:      path));
-                }
-            }
-            finally
-            {
-                mo.Dispose();
-            }
+            // WMI failure — return whatever we already collected.
         }
 
         return alerts;

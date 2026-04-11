@@ -99,7 +99,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         if (_dashboard is null || _dashboard.IsDisposed)
         {
-            _dashboard = new DashboardForm(_config, _logger, _dashboardSink, _consoleSink, _configPath);
+            _dashboard = new DashboardForm(_config, _logger, _dashboardSink, _consoleSink, _configPath, _host);
             _dashboard.FormClosed += (_, _) => _dashboard = null;
         }
         _dashboard.Show();
@@ -196,17 +196,40 @@ public sealed class TrayApplicationContext : ApplicationContext
 /// Buffers alerts in memory and exposes an event for the dashboard to wire
 /// onto its ListView. Created here (not in DashboardForm) so the buffer
 /// survives across dashboard open/close cycles.
+///
+/// Threading contract:
+///   * Receive() is called from the MonitorHost background thread.
+///   * AlertReceived fires synchronously on the SAME background thread —
+///     handlers must marshal to the UI thread themselves before touching
+///     any WinForms control (DashboardForm.OnAlertReceived does this via
+///     BeginInvoke).
+///   * All / Count return a snapshot under the internal lock so the UI
+///     can enumerate safely while Receive is mutating the buffer.
 /// </summary>
 public sealed class DashboardSink : IAlertSink
 {
     private readonly System.Collections.Generic.List<Alert> _buffer = new();
+    private readonly object _lock = new();
     public event Action<Alert>? AlertReceived;
 
-    public System.Collections.Generic.IReadOnlyList<Alert> All => _buffer;
+    /// <summary>
+    /// Returns a snapshot of every buffered alert. Safe to enumerate from
+    /// any thread because the snapshot is taken under the lock.
+    /// </summary>
+    public System.Collections.Generic.IReadOnlyList<Alert> All
+    {
+        get { lock (_lock) return _buffer.ToArray(); }
+    }
+
+    /// <summary>Cheap thread-safe count, no allocation.</summary>
+    public int Count
+    {
+        get { lock (_lock) return _buffer.Count; }
+    }
 
     public void Receive(Alert alert)
     {
-        lock (_buffer) _buffer.Add(alert);
+        lock (_lock) _buffer.Add(alert);
         try { AlertReceived?.Invoke(alert); } catch { }
     }
 }

@@ -94,17 +94,30 @@ public static class Paths
 
     private static bool IsWritable(string dir)
     {
+        if (!Directory.Exists(dir)) return false;
+        var probe = Path.Combine(dir, $".whs_write_probe_{Guid.NewGuid():N}");
+        bool wrote = false;
         try
         {
-            if (!Directory.Exists(dir)) return false;
-            var probe = Path.Combine(dir, $".whs_write_probe_{Guid.NewGuid():N}");
             File.WriteAllText(probe, "");
-            File.Delete(probe);
+            wrote = true;
             return true;
         }
         catch
         {
             return false;
+        }
+        finally
+        {
+            // Always try to clean up the probe even if a concurrent AV scan
+            // (or, in theory, a permission flip between the Write and the
+            // Delete) prevented the original delete. Without this, the
+            // probe could be left as a stray .whs_write_probe_XXX file in
+            // the install dir or LocalAppData over time.
+            if (wrote)
+            {
+                try { File.Delete(probe); } catch { }
+            }
         }
     }
 }

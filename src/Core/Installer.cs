@@ -23,7 +23,7 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.3.4";
+    public const string ProductVersion = "7.4.0";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
 
@@ -210,9 +210,10 @@ public static class Installer
         if (t is null) throw new InvalidOperationException("WScript.Shell not registered");
         dynamic? shell = Activator.CreateInstance(t);
         if (shell is null) throw new InvalidOperationException("WScript.Shell instance is null");
+        dynamic? sc = null;
         try
         {
-            dynamic sc = shell.CreateShortcut(lnkPath);
+            sc = shell.CreateShortcut(lnkPath);
             sc.TargetPath       = targetExe;
             sc.WorkingDirectory = Path.GetDirectoryName(targetExe) ?? "";
             sc.IconLocation     = targetExe + ",0";
@@ -221,6 +222,13 @@ public static class Installer
         }
         finally
         {
+            // Both COM objects must be released. Releasing only the outer
+            // WScript.Shell left the inner ShellLink object pinned in the
+            // CLR's RCW table, leaking one COM handle per shortcut written.
+            if (sc is not null)
+            {
+                try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(sc); } catch { }
+            }
             try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); } catch { }
         }
     }

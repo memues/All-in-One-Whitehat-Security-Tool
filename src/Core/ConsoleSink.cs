@@ -16,13 +16,24 @@ public sealed class ConsoleSink : IAlertSink
 
     public event Action<string>? LineAppended;
 
+    /// <summary>
+    /// Number of lines that were silently evicted because the ring buffer
+    /// was full. Surfaced on the Console page so the user can tell when
+    /// log volume has exceeded the buffer's display window.
+    /// </summary>
+    public int LinesDropped { get; private set; }
+
     public void WriteLine(string line)
     {
         var stamp = $"[{DateTime.Now:HH:mm:ss}] {line}";
         lock (_lock)
         {
             _lines.Enqueue(stamp);
-            while (_lines.Count > MaxLines) _lines.Dequeue();
+            while (_lines.Count > MaxLines)
+            {
+                _lines.Dequeue();
+                LinesDropped++;
+            }
         }
         try { LineAppended?.Invoke(stamp); } catch { }
     }

@@ -60,7 +60,7 @@ public sealed partial class DashboardForm
         };
         var version = new Label
         {
-            Text      = "v7.2 Dashboard",
+            Text      = "v7.4 Dashboard",
             ForeColor = Theme.TextDim,
             Font      = new Font("Segoe UI", 8),
             AutoSize  = false,
@@ -198,7 +198,10 @@ public sealed partial class DashboardForm
             Text =
                 $"Computer: {Environment.MachineName}    " +
                 $"User: {Environment.UserName}    " +
-                $"Started: {DateTime.Now:HH:mm:ss}    " +
+                // Use the program start time captured in Program.cs (not
+                // DateTime.Now at form-construction time, which would lie
+                // by the difference between launch and dashboard open).
+                $"Started: {Program.StartedAt:HH:mm:ss}    " +
                 $"Architecture: {(Environment.Is64BitProcess ? "x64" : "x86")}",
             Font      = Theme.Mono(9, FontStyle.Bold),
             ForeColor = Theme.TextMain,
@@ -393,8 +396,29 @@ public sealed partial class DashboardForm
         _btnExportCsv.Click  += OnExportCsvClick;
         StyleSmallButton(_btnExportJson, "Export JSON", new Point(572, 49));
         _btnExportJson.Click += OnExportJsonClick;
+        StyleSmallButton(_btnClearAlerts, "Clear All",  new Point(672, 49));
+        _btnClearAlerts.Click += OnClearAlertsClick;
         page.Controls.Add(_btnExportCsv);
         page.Controls.Add(_btnExportJson);
+        page.Controls.Add(_btnClearAlerts);
+
+        // Right-click context menu on the alerts list. Items hidden/shown
+        // dynamically based on which fields the selected alert populates.
+        _alertContextMenu = new ContextMenuStrip();
+        _ctxCopyRow.Click     += OnAlertCopyRowClick;
+        _ctxCopyMessage.Click += OnAlertCopyMessageClick;
+        _ctxIpLookup.Click    += OnIpLookupClick;
+        _ctxBlockIp.Click     += OnBlockIpClick;
+        _ctxKill.Click        += OnKillProcessClick;
+        _ctxOpenLog.Click     += OnOpenLogClick;
+        _ctxRegedit.Click     += OnRegeditClick;
+        _alertContextMenu.Items.AddRange(new ToolStripItem[]
+        {
+            _ctxCopyRow, _ctxCopyMessage,
+            new ToolStripSeparator(),
+            _ctxIpLookup, _ctxBlockIp, _ctxKill, _ctxOpenLog, _ctxRegedit,
+        });
+        _alertContextMenu.Opening += OnAlertContextMenuOpening;
 
         // ── Alerts list ──
         _alertsList.Location      = new Point(8, 84);
@@ -414,6 +438,7 @@ public sealed partial class DashboardForm
         _alertsList.Columns.Add("Message",  140);
         _alertsList.SelectedIndexChanged += OnAlertSelected;
         _alertsList.ColumnClick += OnAlertColumnClick;
+        _alertsList.ContextMenuStrip = _alertContextMenu;
         page.Controls.Add(_alertsList);
 
         // Detail panel on the right
@@ -433,7 +458,11 @@ public sealed partial class DashboardForm
         _alertDetailBody.Size       = new Size(460, 360);
         _alertDetailBody.Multiline  = true;
         _alertDetailBody.ReadOnly   = true;
-        _alertDetailBody.ScrollBars = ScrollBars.Vertical;
+        // WordWrap off + Both scrollbars so a long path or message is
+        // horizontally scrollable instead of being silently cut off at
+        // the right edge of the panel.
+        _alertDetailBody.WordWrap   = false;
+        _alertDetailBody.ScrollBars = ScrollBars.Both;
         _alertDetailBody.BackColor  = Theme.Card;
         _alertDetailBody.ForeColor  = Theme.TextMain;
         _alertDetailBody.Font       = Theme.Mono(9);
@@ -597,7 +626,26 @@ public sealed partial class DashboardForm
             Location  = new Point(8, y),
         };
         page.Controls.Add(subtitle);
-        y += 30;
+        y += 28;
+
+        // -------- Reset / Export / Import button row --------
+        var btnReset  = new Button { Text = "Reset to Defaults", Location = new Point(20,  y), Size = new Size(140, 28) };
+        var btnExport = new Button { Text = "Export Config",     Location = new Point(166, y), Size = new Size(120, 28) };
+        var btnImport = new Button { Text = "Import Config",     Location = new Point(292, y), Size = new Size(120, 28) };
+        foreach (var b in new[] { btnReset, btnExport, btnImport })
+        {
+            b.FlatStyle = FlatStyle.Flat;
+            b.BackColor = Theme.BtnHover;
+            b.ForeColor = Theme.TextMain;
+            b.Font      = new Font("Segoe UI", 9, FontStyle.Bold);
+            b.Cursor    = Cursors.Hand;
+            b.FlatAppearance.BorderSize = 0;
+            page.Controls.Add(b);
+        }
+        btnReset.Click  += OnResetSettingsClick;
+        btnExport.Click += OnExportSettingsClick;
+        btnImport.Click += OnImportSettingsClick;
+        y += 38;
 
         // -------- Notification Categories section --------
         y = AddSectionHeader(page, "Notification Categories", y);
@@ -748,7 +796,7 @@ public sealed partial class DashboardForm
     // ============================================================================
     private Panel BuildLogsPage()
     {
-        var page = new Panel { BackColor = Theme.Bg };
+        var page = new Panel { BackColor = Theme.Bg, AutoScroll = true };
 
         var title = new Label
         {
@@ -762,7 +810,7 @@ public sealed partial class DashboardForm
 
         var subtitle = new Label
         {
-            Text      = "Daily log files written next to the executable. Click any card to open in Notepad.",
+            Text      = "Every log file under the data directory. Click any card to open in Notepad. Files older than 30 days are pruned automatically at startup.",
             Font      = Theme.Body(9),
             ForeColor = Theme.TextDim,
             AutoSize  = true,
@@ -771,34 +819,53 @@ public sealed partial class DashboardForm
         page.Controls.Add(subtitle);
 
         var logsDir = Paths.LogsDir;
-        var today   = DateTime.Now.ToString("yyyy-MM-dd");
-        var entries = new (string Title, string FileName, string Desc)[]
+        var files = new List<FileInfo>();
+        try
         {
-            ("Monitor Log",     $"monitor_{today}.log",     "All baseline + scan-cycle messages"),
-            ("Alerts Log",      $"alerts_{today}.log",      "All security alerts dispatched this session"),
-            ("Connections Log", $"connections_{today}.log", "Outbound network connections detected"),
-            ("Processes Log",   $"processes_{today}.log",   "New process and behavior alerts"),
-        };
+            if (Directory.Exists(logsDir))
+            {
+                foreach (var f in Directory.EnumerateFiles(logsDir, "*.log"))
+                    files.Add(new FileInfo(f));
+            }
+        }
+        catch { /* ignored */ }
+        // Newest first so today's logs are at the top
+        files.Sort((a, b) => b.LastWriteTime.CompareTo(a.LastWriteTime));
+
+        if (files.Count == 0)
+        {
+            var empty = new Label
+            {
+                Text      = "(no log files yet — they appear after the first scan tick)",
+                Font      = Theme.Body(9),
+                ForeColor = Theme.TextDim,
+                AutoSize  = true,
+                Location  = new Point(8, 80),
+            };
+            page.Controls.Add(empty);
+            return page;
+        }
+
         int y = 80;
-        foreach (var entry in entries)
+        foreach (var fi in files)
         {
             var card = new Panel
             {
                 Location  = new Point(8, y),
-                Size      = new Size(840, 64),
+                Size      = new Size(840, 56),
                 BackColor = Theme.Card,
                 Cursor    = Cursors.Hand,
-                Tag       = Path.Combine(logsDir, entry.FileName),
+                Tag       = fi.FullName,
             };
             card.Click += OnOpenFileClick;
 
             var t = new Label
             {
-                Text      = entry.Title,
+                Text      = fi.Name,
                 Font      = new Font("Segoe UI", 11, FontStyle.Bold),
                 ForeColor = Theme.AccentBlue,
                 AutoSize  = true,
-                Location  = new Point(16, 10),
+                Location  = new Point(16, 8),
             };
             t.Click += OnOpenFileClick;
             t.Tag    = card.Tag;
@@ -806,21 +873,29 @@ public sealed partial class DashboardForm
 
             var d = new Label
             {
-                Text      = entry.Desc + " — " + entry.FileName,
+                Text      = $"{FormatFileSize(fi.Length)}   ·   {fi.LastWriteTime:yyyy-MM-dd HH:mm}",
                 Font      = Theme.Mono(9),
                 ForeColor = Theme.TextDim,
                 AutoSize  = true,
-                Location  = new Point(16, 34),
+                Location  = new Point(16, 30),
             };
             d.Click += OnOpenFileClick;
             d.Tag    = card.Tag;
             card.Controls.Add(d);
 
             page.Controls.Add(card);
-            y += 72;
+            y += 64;
         }
 
         return page;
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024)            return $"{bytes} B";
+        if (bytes < 1024 * 1024)     return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
     }
 
     // ============================================================================
@@ -854,6 +929,37 @@ public sealed partial class DashboardForm
         clearBtn.FlatAppearance.BorderSize = 0;
         clearBtn.Click += OnClearConsoleClick;
         page.Controls.Add(clearBtn);
+
+        var saveBtn = new Button
+        {
+            Text      = "Save to File",
+            Location  = new Point(116, 50),
+            Size      = new Size(110, 30),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.BtnHover,
+            ForeColor = Theme.TextMain,
+            Font      = new Font("Segoe UI", 9, FontStyle.Bold),
+            Cursor    = Cursors.Hand,
+        };
+        saveBtn.FlatAppearance.BorderSize = 0;
+        saveBtn.Click += OnSaveConsoleClick;
+        page.Controls.Add(saveBtn);
+
+        _consoleAutoScroll.Text      = "Auto-scroll";
+        _consoleAutoScroll.Location  = new Point(238, 56);
+        _consoleAutoScroll.AutoSize  = true;
+        _consoleAutoScroll.Checked   = true;
+        _consoleAutoScroll.ForeColor = Theme.TextMain;
+        _consoleAutoScroll.BackColor = Theme.Bg;
+        _consoleAutoScroll.Font      = new Font("Segoe UI", 9);
+        page.Controls.Add(_consoleAutoScroll);
+
+        _consoleDroppedLabel.Location  = new Point(360, 56);
+        _consoleDroppedLabel.AutoSize  = true;
+        _consoleDroppedLabel.Font      = new Font("Segoe UI", 9);
+        _consoleDroppedLabel.ForeColor = Theme.TextDim;
+        _consoleDroppedLabel.Text      = "";
+        page.Controls.Add(_consoleDroppedLabel);
 
         _consoleBox.Location    = new Point(8, 90);
         _consoleBox.Size        = new Size(1000, 540);

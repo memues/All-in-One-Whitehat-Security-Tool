@@ -50,6 +50,16 @@ public sealed class AlertGate
 /// Anything that wants to receive alerts (UI list, tray balloon, log file)
 /// implements this. The MonitorHost fans out each Alert to every registered
 /// sink so adding a new output is one line.
+///
+/// Threading contract:
+///   * Receive() is invoked from the MonitorHost background scan thread.
+///     Implementations MUST be thread-safe and MUST NOT touch WinForms
+///     controls directly — marshal to the UI thread via BeginInvoke.
+///   * Receive() should return quickly (< ~50 ms). Long work should be
+///     queued elsewhere; blocking the scan thread blocks every other
+///     engine on the same tick.
+///   * Exceptions thrown from Receive() are caught by MonitorHost.Dispatch
+///     and logged; they do not abort the fan-out to other sinks.
 /// </summary>
 public interface IAlertSink
 {

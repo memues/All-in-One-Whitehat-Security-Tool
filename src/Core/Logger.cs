@@ -26,6 +26,41 @@ public sealed class Logger
         try { Directory.CreateDirectory(_logsDir); } catch { }
     }
 
+    /// <summary>
+    /// Best-effort log retention. Deletes any *.log file in the logs dir
+    /// whose LastWriteTime is older than <paramref name="maxAgeDays"/>.
+    /// Called once at startup from Program.cs so the disk footprint
+    /// stays bounded over months of running.
+    /// </summary>
+    public void CleanupOldLogs(int maxAgeDays = 30)
+    {
+        try
+        {
+            if (!Directory.Exists(_logsDir)) return;
+            var cutoff = DateTime.Now.AddDays(-maxAgeDays);
+            foreach (var file in Directory.EnumerateFiles(_logsDir, "*.log"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTime(file) < cutoff)
+                    {
+                        File.Delete(file);
+                        Info($"Deleted old log file {Path.GetFileName(file)}");
+                    }
+                }
+                catch
+                {
+                    // skip files we can't touch (in use, locked by another
+                    // process, denied by AV) — they'll be retried next start
+                }
+            }
+        }
+        catch
+        {
+            // never let log retention crash the process
+        }
+    }
+
     public void Info (string message)        => Write("INFO",  "monitor", message);
     public void Warn (string message)        => Write("WARN",  "monitor", message);
     public void Error(string message)        => Write("ERROR", "monitor", message);

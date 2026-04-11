@@ -18,6 +18,16 @@ namespace WhitehatSecurity.Core;
 /// </summary>
 public sealed class NotifyConfig
 {
+    /// <summary>
+    /// Schema version of the on-disk JSON. Bumped whenever a field is
+    /// added/removed/renamed so a future migration step can recognise an
+    /// old layout. Currently always 1; the LoadOrCreate path tolerates a
+    /// missing field (treated as 1) for back-compat with v7.3.x configs
+    /// that did not write this key.
+    /// </summary>
+    [JsonPropertyName("SchemaVersion")]
+    public int SchemaVersion { get; set; } = 1;
+
     // ---------------- Notification categories (10) ----------------
 
     [JsonPropertyName("Firmware")]   public bool Firmware   { get; set; }
@@ -156,11 +166,27 @@ public sealed class NotifyConfig
             {
                 var raw = File.ReadAllText(path);
                 var loaded = JsonSerializer.Deserialize<NotifyConfig>(raw, JsonOpts);
-                if (loaded is not null) return loaded;
+                if (loaded is not null)
+                {
+                    // Future migration hook: if SchemaVersion < CurrentSchema,
+                    // run any conversion here. Currently we only support v1
+                    // so a missing/zero version is treated as v1.
+                    if (loaded.SchemaVersion == 0) loaded.SchemaVersion = 1;
+                    return loaded;
+                }
             }
             catch
             {
-                // fall through to defaults if the file is corrupt
+                // Malformed JSON — preserve the corrupt file as a timestamped
+                // backup so the user can recover hand-edited fields, then
+                // fall through to defaults. Without this the user silently
+                // loses every customised setting on the next launch.
+                try
+                {
+                    var bak = path + $".bak.{DateTime.Now:yyyyMMdd_HHmmss}";
+                    File.Copy(path, bak, overwrite: true);
+                }
+                catch { }
             }
         }
 
@@ -175,7 +201,26 @@ public sealed class NotifyConfig
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);
 
+        // Atomic write: serialise to a .tmp sibling first, then
+        // File.Move-replace into place. Without this, a crash midway
+        // through File.WriteAllText would leave a half-written JSON file
+        // that the next LoadOrCreate would treat as corrupt and replace
+        // with defaults — losing every user setting.
         var json = JsonSerializer.Serialize(this, JsonOpts);
-        File.WriteAllText(path, json);
+        var tmp  = path + ".tmp";
+        File.WriteAllText(tmp, json);
+        try
+        {
+            // .NET 8 File.Move(overwrite: true) is atomic on NTFS.
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            // Fallback for the rare filesystem where atomic Move fails:
+            // fall back to a plain copy + delete. Slightly less safe but
+            // still better than the original WriteAllText.
+            try { File.Copy(tmp, path, overwrite: true); File.Delete(tmp); }
+            catch { }
+        }
     }
 }

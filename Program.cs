@@ -30,7 +30,16 @@ namespace WhitehatSecurity;
 
 internal static class Program
 {
-    private const string MutexName = "Global\\WhitehatSecurity-7.2-singleinstance";
+    private const string MutexName = "Global\\WhitehatSecurity-7.4-singleinstance";
+
+    /// <summary>
+    /// UTC start time of the process. Captured at the very top of Main so
+    /// the Status page can show "Started: HH:mm:ss" relative to when the
+    /// program actually launched (instead of when the dashboard form was
+    /// constructed, which can be hours later if the user only opens the
+    /// dashboard from the tray after a long uptime).
+    /// </summary>
+    public static readonly DateTime StartedAt = DateTime.Now;
 
     [STAThread]
     private static int Main(string[] args)
@@ -150,6 +159,9 @@ internal static class Program
         var config       = NotifyConfig.LoadOrCreate(configPath);
         var logger       = new Logger(logsDir);
         var consoleSink  = new ConsoleSink();
+        // Prune log files older than 30 days so the disk footprint stays
+        // bounded over months of running. Best-effort — never throws.
+        logger.CleanupOldLogs(30);
         logger.Info($"=== WhitehatSecurity {Installer.ProductVersion} starting (silent={silent}) ===");
         logger.Info($"Exe:         {Environment.ProcessPath}");
         logger.Info($"Data dir:    {Paths.DataDir}");

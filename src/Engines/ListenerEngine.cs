@@ -104,7 +104,13 @@ public sealed class ListenerEngine : IMonitorEngine
 
     private static string? SafeProcessName(int pid)
     {
-        try { return Process.GetProcessById(pid).ProcessName; }
+        // `using` releases the kernel handle Process.GetProcessById opens.
+        // Same handle leak class as ConnectionEngine.SafeProcessName.
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return p.ProcessName;
+        }
         catch { return null; }
     }
 }

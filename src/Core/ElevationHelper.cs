@@ -12,6 +12,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 
 namespace WhitehatSecurity.Core;
 
@@ -80,7 +81,16 @@ public static class ElevationHelper
 
     public static int SetFirewallProfile(string profile, bool enabled, Logger? logger = null)
     {
-        // profile = "Domain" | "Private" | "Public"
+        // Validate `profile` against an allowlist before interpolating it
+        // into the elevated PowerShell snippet. The current UI only ever
+        // passes one of these three strings, but defense in depth: every
+        // value that crosses into a privileged script must be either
+        // typed-validated or quoted, never trusted as-is.
+        if (profile != "Domain" && profile != "Private" && profile != "Public")
+        {
+            logger?.Warn($"SetFirewallProfile: rejected invalid profile '{profile}'");
+            return -5;
+        }
         var state = enabled ? "True" : "False";
         return RunElevated(
             $"Set-NetFirewallProfile -Name {profile} -Enabled {state} -ErrorAction Stop",
@@ -114,8 +124,25 @@ public static class ElevationHelper
     public static int BlockIpAddress(string ip, Logger? logger = null)
     {
         if (string.IsNullOrWhiteSpace(ip)) return -4;
+
+        // CRITICAL SECURITY FIX: previous versions interpolated `ip`
+        // straight into a PowerShell script. An IP that contained
+        // PowerShell metacharacters or single quotes (e.g. an attacker
+        // poisoning a remote-IP-derived alert) would execute arbitrary
+        // elevated code. Validate against IPAddress.TryParse first; once
+        // an address has round-tripped through Parse, the canonical
+        // string form is restricted to digits, dots, colons, and
+        // hexadecimal — none of which can break out of a single-quoted
+        // PowerShell literal.
+        if (!IPAddress.TryParse(ip, out var parsed))
+        {
+            logger?.Warn($"BlockIpAddress: rejected non-IP value '{ip}'");
+            return -5;
+        }
+        var safeIp = parsed.ToString();
+
         var script = $@"
-$ip = '{ip}'
+$ip = '{safeIp}'
 $ruleIn  = ""WHS_Block_$ip" + @"_In""
 $ruleOut = ""WHS_Block_$ip" + @"_Out""
 if (-not (Get-NetFirewallRule -DisplayName $ruleIn  -ErrorAction SilentlyContinue)) {{

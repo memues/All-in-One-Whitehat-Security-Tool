@@ -25,6 +25,12 @@ public static class SecurityPosture
 {
     // ----------------------------------------------------------------------
     //  Defender
+    //
+    //  Each WMI query method below explicitly disposes the
+    //  ManagementObjectCollection AND every ManagementObject pulled out
+    //  of it. Without this, every Status page refresh leaks COM
+    //  references, and after ~100 refreshes WMI starts returning empty
+    //  collections because the underlying object cache is exhausted.
     // ----------------------------------------------------------------------
     public static PostureState Defender()
     {
@@ -36,13 +42,18 @@ public static class SecurityPosture
             using var searcher = new ManagementObjectSearcher(
                 @"root\SecurityCenter2",
                 "SELECT productState FROM AntiVirusProduct");
-            foreach (ManagementObject mo in searcher.Get())
+            using var collection = searcher.Get();
+            foreach (ManagementObject mo in collection)
             {
-                // productState bit layout: bit 12 (=0x1000) = enabled
-                if (int.TryParse(mo["productState"]?.ToString(), out int state))
+                try
                 {
-                    if ((state & 0x1000) != 0) return PostureState.Good;
+                    // productState bit layout: bit 12 (=0x1000) = enabled
+                    if (int.TryParse(mo["productState"]?.ToString(), out int state))
+                    {
+                        if ((state & 0x1000) != 0) return PostureState.Good;
+                    }
                 }
+                finally { mo.Dispose(); }
             }
         }
         catch { }
@@ -71,12 +82,17 @@ public static class SecurityPosture
             using var searcher = new ManagementObjectSearcher(
                 @"root\SecurityCenter2",
                 "SELECT productState FROM FirewallProduct");
-            foreach (ManagementObject mo in searcher.Get())
+            using var collection = searcher.Get();
+            foreach (ManagementObject mo in collection)
             {
-                if (int.TryParse(mo["productState"]?.ToString(), out int state))
+                try
                 {
-                    if ((state & 0x1000) != 0) return PostureState.Good;
+                    if (int.TryParse(mo["productState"]?.ToString(), out int state))
+                    {
+                        if ((state & 0x1000) != 0) return PostureState.Good;
+                    }
                 }
+                finally { mo.Dispose(); }
             }
         }
         catch { }
@@ -151,11 +167,16 @@ public static class SecurityPosture
             using var searcher = new ManagementObjectSearcher(
                 @"root\CIMV2\Security\MicrosoftTpm",
                 "SELECT IsActivated_InitialValue, IsEnabled_InitialValue FROM Win32_Tpm");
-            foreach (ManagementObject mo in searcher.Get())
+            using var collection = searcher.Get();
+            foreach (ManagementObject mo in collection)
             {
-                bool activated = mo["IsActivated_InitialValue"] is bool a && a;
-                bool enabled   = mo["IsEnabled_InitialValue"]   is bool e && e;
-                return (activated && enabled) ? PostureState.Good : PostureState.Bad;
+                try
+                {
+                    bool activated = mo["IsActivated_InitialValue"] is bool a && a;
+                    bool enabled   = mo["IsEnabled_InitialValue"]   is bool e && e;
+                    return (activated && enabled) ? PostureState.Good : PostureState.Bad;
+                }
+                finally { mo.Dispose(); }
             }
             return PostureState.NA;     // no TPM at all
         }
@@ -172,13 +193,18 @@ public static class SecurityPosture
             using var searcher = new ManagementObjectSearcher(
                 @"root\Microsoft\Windows\DeviceGuard",
                 "SELECT SecurityServicesRunning FROM Win32_DeviceGuard");
-            foreach (ManagementObject mo in searcher.Get())
+            using var collection = searcher.Get();
+            foreach (ManagementObject mo in collection)
             {
-                if (mo["SecurityServicesRunning"] is uint[] running)
-                    return running.Contains((uint)2) ? PostureState.Good : PostureState.Bad;
-                // Newer builds return int[] instead of uint[]; try both.
-                if (mo["SecurityServicesRunning"] is int[] runningInt)
-                    return runningInt.Contains(2) ? PostureState.Good : PostureState.Bad;
+                try
+                {
+                    if (mo["SecurityServicesRunning"] is uint[] running)
+                        return running.Contains((uint)2) ? PostureState.Good : PostureState.Bad;
+                    // Newer builds return int[] instead of uint[]; try both.
+                    if (mo["SecurityServicesRunning"] is int[] runningInt)
+                        return runningInt.Contains(2) ? PostureState.Good : PostureState.Bad;
+                }
+                finally { mo.Dispose(); }
             }
         }
         catch { }
@@ -197,11 +223,16 @@ public static class SecurityPosture
             using var searcher = new ManagementObjectSearcher(
                 @"root\CIMV2\Security\MicrosoftVolumeEncryption",
                 $"SELECT ProtectionStatus FROM Win32_EncryptableVolume WHERE DriveLetter='{sysDrive}'");
-            foreach (ManagementObject mo in searcher.Get())
+            using var collection = searcher.Get();
+            foreach (ManagementObject mo in collection)
             {
-                // ProtectionStatus: 0 = off, 1 = on, 2 = unknown
-                var ps = Convert.ToInt32(mo["ProtectionStatus"] ?? 0);
-                return ps == 1 ? PostureState.Good : PostureState.Bad;
+                try
+                {
+                    // ProtectionStatus: 0 = off, 1 = on, 2 = unknown
+                    var ps = Convert.ToInt32(mo["ProtectionStatus"] ?? 0);
+                    return ps == 1 ? PostureState.Good : PostureState.Bad;
+                }
+                finally { mo.Dispose(); }
             }
         }
         catch { }
