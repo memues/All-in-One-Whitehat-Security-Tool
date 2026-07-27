@@ -15,6 +15,24 @@ public sealed class RegistryEngine : IMonitorEngine
     private readonly Dictionary<RegistrySlot, RegistryValueSnapshot> _baseline =
         new();
 
+    private readonly Logger? _logger;
+
+    /// <summary>
+    /// Keys whose capture has already been reported as failing. A key that
+    /// cannot be read usually cannot be read on the next tick either, and a
+    /// warning every ten seconds would bury the log.
+    /// </summary>
+    private readonly HashSet<string> _reportedFailures =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The logger is optional so tests can construct the engine bare, but the
+    /// application always supplies one: a watched key that silently stops
+    /// being readable means this engine quietly stops detecting Run-key
+    /// persistence, and until v7.4.14 that left no trace anywhere.
+    /// </summary>
+    public RegistryEngine(Logger? logger = null) => _logger = logger;
+
     private static readonly RegistryView[] WatchedViews =
         Environment.Is64BitOperatingSystem
             ? new[] { RegistryView.Registry64, RegistryView.Registry32 }
@@ -95,10 +113,26 @@ public sealed class RegistryEngine : IMonitorEngine
                         key, valueNameOrStar);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            // Swallowing this silently is how a monitoring engine stops
+            // monitoring without anyone noticing. Report each key once so a
+            // permanent failure is visible in the log and the Console tab.
+            var slotId = $"{hive}/{view}/{keyPath}/{valueNameOrStar}";
+            bool firstTime;
+            lock (_reportedFailures)
+                firstTime = _reportedFailures.Add(slotId);
+            if (firstTime)
+                _logger?.Warn(
+                    $"Registry watch unavailable for {slotId}: " +
+                    $"{ex.GetType().Name}: {ex.Message}");
             return;
         }
+
+        // Reading worked, so a later failure on this key is news again.
+        lock (_reportedFailures)
+            _reportedFailures.Remove(
+                $"{hive}/{view}/{keyPath}/{valueNameOrStar}");
 
         foreach (var (name, value) in current)
         {

@@ -222,7 +222,7 @@ internal static class Program
         host.Register(new ProcessEngine());
         host.Register(new DriverEngine());
         host.Register(new ServiceEngine());
-        host.Register(new RegistryEngine());
+        host.Register(new RegistryEngine(logger));
         host.Register(new HostsEngine());
         host.Register(new FirmwareEngine());
         host.Register(new RdpEngine());

@@ -717,6 +717,73 @@ Run("Registry rollback preserves value kind and rejects stale alerts", () =>
     }
 });
 
+Run("Registry engine reports a Run-key change after its baseline", () =>
+{
+    // End-to-end for the engine the way MonitorHost drives it: baseline
+    // first, change the registry afterwards, then scan. Both registry views
+    // are watched, so a single change is expected to raise twice.
+    const string runKey =
+        @"Software\Microsoft\Windows\CurrentVersion\Run";
+    var valueName = $"WhsSmokeTest_{Guid.NewGuid():N}"[..24];
+    var logDir = Path.Combine(
+        Path.GetTempPath(), $"whs-reg-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(logDir);
+    try
+    {
+        var engine = new RegistryEngine(new Logger(logDir));
+        engine.Initialize();
+        Equal(0, engine.Scan().Count());
+
+        using (var key = Registry.CurrentUser.OpenSubKey(runKey, true)
+            ?? throw new InvalidOperationException("No HKCU Run key."))
+        {
+            key.SetValue(
+                valueName, @"C:\example\persist.exe",
+                RegistryValueKind.String);
+        }
+
+        var added = engine.Scan().ToList();
+        Equal(
+            true,
+            added.All(a => a.Category == "Registry"));
+        var mine = added
+            .Where(a => a.Message.Contains(valueName, StringComparison.Ordinal))
+            .ToList();
+        Equal(2, mine.Count);
+        Equal(true, mine.All(a => a.Title == "REGISTRY ADDED"));
+        // The payload is what makes the Undo button work.
+        Equal(
+            true,
+            mine.All(a =>
+                a.Extra is not null
+                && a.Extra.ContainsKey(
+                    RegistryRollbackService.PayloadMetadataKey)));
+
+        // A scan with nothing new must be silent, or the alert list fills
+        // with the same finding every ten seconds.
+        Equal(0, engine.Scan().Count());
+
+        using (var key = Registry.CurrentUser.OpenSubKey(runKey, true)!)
+            key.DeleteValue(valueName, false);
+
+        var removed = engine.Scan()
+            .Where(a => a.Message.Contains(valueName, StringComparison.Ordinal))
+            .ToList();
+        Equal(2, removed.Count);
+        Equal(true, removed.All(a => a.Title == "REGISTRY REMOVED"));
+    }
+    finally
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(runKey, true);
+            key?.DeleteValue(valueName, false);
+        }
+        catch { }
+        try { Directory.Delete(logDir, recursive: true); } catch { }
+    }
+});
+
 Run("Registry snapshots preserve binary and multi-string data", () =>
 {
     var testKeyPath =
