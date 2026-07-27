@@ -61,7 +61,7 @@ public sealed partial class DashboardForm
         };
         var version = new Label
         {
-            Text      = "v7.4.3 Dashboard",
+            Text      = $"v{Installer.ProductVersion} Dashboard",
             ForeColor = Theme.TextDim,
             Font      = new Font("Segoe UI", 8),
             AutoSize  = false,
@@ -828,10 +828,8 @@ public sealed partial class DashboardForm
             FlatStyle     = FlatStyle.Flat,
             Font          = Theme.Body(9),
         };
-        dnsCombo.Items.AddRange(new object[]
-        {
-            "None", "Cloudflare", "Quad9", "Google", "OpenDNS", "AdGuard"
-        });
+        dnsCombo.Items.AddRange(
+            DnsConfiguration.ProviderNames.ToArray<object>());
         dnsCombo.SelectedItem = _config.DNS_Provider;
         dnsCombo.SelectedIndexChanged += OnDnsProviderChanged;
         page.Controls.Add(dnsCombo);

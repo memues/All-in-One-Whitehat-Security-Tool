@@ -115,6 +115,122 @@ Run("Secure DNS configures both resolvers without destructive disable", () =>
     AssertPowerShellParses(disable);
 });
 
+Run("DNS provider names come from a single catalog", () =>
+{
+    Equal(
+        "None,Cloudflare,Quad9,Google,OpenDNS,AdGuard",
+        string.Join(",", DnsConfiguration.ProviderNames));
+
+    // A hand-edited config used to validate as "cloudflare" and then fail
+    // every apply with -5, because validation was case-insensitive and the
+    // provider lookup was ordinal.
+    Equal(
+        true,
+        DnsConfiguration.TryNormalizeProviderName(
+            "cloudflare", out var canonical));
+    Equal("Cloudflare", canonical);
+    Equal(
+        true,
+        DnsConfiguration.TryNormalizeProviderName(
+            "none", out var automatic));
+    Equal("None", automatic);
+    Equal(
+        false,
+        DnsConfiguration.TryNormalizeProviderName(
+            "NotAProvider", out _));
+
+    var config = NotifyConfig.LoadStrictJson(
+        """{"SchemaVersion":1,"DNS_Provider":"cloudflare","DNS_DoH":true}""");
+    Equal("Cloudflare", config.DNS_Provider);
+    Equal(true, config.DNS_DoH);
+
+    var openDns = NotifyConfig.LoadStrictJson(
+        """{"SchemaVersion":1,"DNS_Provider":"OpenDNS","DNS_DoH":true}""");
+    Equal(false, openDns.DNS_DoH);
+
+    foreach (var name in DnsConfiguration.ProviderNames)
+    {
+        if (name == "None") continue;
+        // Every listed provider must be applicable, or the settings combo
+        // offers an option that cannot be selected.
+        _ = DnsConfiguration.BuildProviderScript(name);
+    }
+    Equal(false, DnsConfiguration.SupportsDoh("None"));
+    Equal(false, DnsConfiguration.SupportsDoh("OpenDNS"));
+    Equal(true, DnsConfiguration.SupportsDoh("AdGuard"));
+});
+
+Run("Uninstall cleanup restores automatic DNS and both DoH resolvers", () =>
+{
+    var script = ElevationHelper.BuildCleanupScript();
+
+    // Deciding from ServerAddresses alone pinned the DHCP-supplied
+    // resolvers as a static configuration on uninstall.
+    Contains("if ([bool]$adapter.Automatic)", script);
+
+    // v7.4.3 started configuring the secondary resolver for DoH but the
+    // cleanup list still only named the primaries.
+    foreach (var address in new[]
+             {
+                 "1.1.1.1", "1.0.0.1",
+                 "9.9.9.9", "149.112.112.112",
+                 "8.8.8.8", "8.8.4.4",
+                 "94.140.14.14", "94.140.15.15",
+             })
+        Contains($"'{address}'", script);
+
+    // OpenDNS has no managed DoH template, so it must not be listed.
+    DoesNotContain("208.67.222.222", script);
+
+    AssertPowerShellParses(script);
+});
+
+Run("Version metadata agrees across the project", () =>
+{
+    var root = FindRepositoryRoot();
+    if (root is null)
+    {
+        // Running from a packaged output without the sources next to it.
+        return;
+    }
+
+    var csproj = File.ReadAllText(
+        Path.Combine(root, "WhitehatSecurity.csproj"));
+    var manifest = File.ReadAllText(
+        Path.Combine(root, "app.manifest"));
+
+    var declared = System.Text.RegularExpressions.Regex.Match(
+        csproj, @"<Version>([^<]+)</Version>").Groups[1].Value;
+    var manifestVersion = System.Text.RegularExpressions.Regex.Match(
+        manifest, @"<assemblyIdentity version=""([^""]+)""").Groups[1].Value;
+
+    Equal(declared, manifestVersion);
+
+    var assemblyVersion =
+        typeof(Installer).Assembly.GetName().Version
+        ?? throw new InvalidOperationException("No assembly version.");
+    Equal(Version.Parse(declared), assemblyVersion);
+    Equal(
+        assemblyVersion.ToString(3),
+        Installer.ProductVersion);
+});
+
+Run("Upgrade detection compares major.minor.build", () =>
+{
+    Equal(true, Installer.IsUpgrade(
+        new Version(7, 4, 4, 0), new Version(7, 4, 1, 0)));
+    Equal(false, Installer.IsUpgrade(
+        new Version(7, 4, 1, 0), new Version(7, 4, 3, 0)));
+    Equal(false, Installer.IsUpgrade(
+        new Version(7, 4, 4, 0), new Version(7, 4, 4, 0)));
+    // The revision field is always 0 in release builds; a difference there
+    // must not present itself to the user as an available update.
+    Equal(false, Installer.IsUpgrade(
+        new Version(7, 4, 4, 9), new Version(7, 4, 4, 0)));
+    Equal(true, Installer.IsUpgrade(
+        new Version(7, 5, 0, 0), new Version(7, 4, 9, 0)));
+});
+
 Run("Catalog-signed Windows executables are trusted", () =>
 {
     var system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
@@ -559,6 +675,23 @@ static void AssertPowerShellParses(string script)
     {
         try { File.Delete(path); } catch { }
     }
+}
+
+/// <summary>
+/// Walks up from the test binary to the directory holding
+/// WhitehatSecurity.csproj. Returns null when the sources are not present.
+/// </summary>
+static string? FindRepositoryRoot()
+{
+    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    while (directory is not null)
+    {
+        if (File.Exists(Path.Combine(
+                directory.FullName, "WhitehatSecurity.csproj")))
+            return directory.FullName;
+        directory = directory.Parent;
+    }
+    return null;
 }
 
 static void RunSta(Action action)

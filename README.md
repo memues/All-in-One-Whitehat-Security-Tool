@@ -47,6 +47,7 @@ The `.exe` is its own installer. Just download `WhitehatSecurity.exe` from the l
   - creates a **Start Menu** shortcut
   - creates a shortcut on **the user's Desktop** (handles OneDrive Known Folder Move) and on the **Public Desktop**
   - adds an **HKLM\…\Run** entry so the program **auto-starts at every logon** in tray-only mode (`--silent`)
+- **Updating**: run a newer `.exe` from outside the install directory. It compares its own version with the copy in `C:\Program Files\Whitehat Security\` and offers to update it; accepting stops the running installed instance, replaces the binary, and restarts it in tray mode. Answering *No* runs the new copy portably and leaves the installed one untouched.
 - **Uninstall**: open *Settings → Apps → Apps & Features*, find **Whitehat Security**, click *Uninstall*. Or run `WhitehatSecurity.exe --uninstall` from a terminal. The uninstaller removes the install dir, shortcuts, registry entries, app-managed firewall/hosts rules, and restores DNS settings saved before the app changed them.
 
 CLI flags:

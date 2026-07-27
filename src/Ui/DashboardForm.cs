@@ -1521,7 +1521,7 @@ public sealed partial class DashboardForm : Form
 
             _config.DNS_Provider = picked;
             _config.DNS_DoH =
-                hadDoh && picked is not ("None" or "OpenDNS");
+                hadDoh && DnsConfiguration.SupportsDoh(picked);
 
             if (_config.DNS_DoH)
             {
@@ -1799,8 +1799,8 @@ public sealed partial class DashboardForm : Form
     {
         if (!_settingsCheckboxes.TryGetValue("DNS_DoH", out var doh))
             return;
-        var supported = _config.DNS_Provider is
-            "Cloudflare" or "Quad9" or "Google" or "AdGuard";
+        var supported =
+            DnsConfiguration.SupportsDoh(_config.DNS_Provider);
         doh.Enabled = supported;
         if (!supported && doh.Checked)
         {

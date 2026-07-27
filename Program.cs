@@ -103,63 +103,85 @@ internal static class Program
         // ── First-run install prompt ────────────────────────────────────
         // Done BEFORE acquiring the mutex so the launched installed copy
         // does not race with this process for mutex ownership.
-        if (!silent
-            && !Installer.IsRunningFromInstallDir()
-            && !Installer.IsAlreadyInstalled())
+        if (!silent && !Installer.IsRunningFromInstallDir())
         {
-            var answer = MessageBox.Show(
-                $"Install {Installer.ProductName} {Installer.ProductVersion} to:\n\n" +
-                $"    {Installer.DefaultInstallDir}\n\n" +
-                "This adds the program to Windows Apps & Features so it can\n" +
-                "be uninstalled the normal way, and creates Start Menu and\n" +
-                "Desktop shortcuts.\n\n" +
-                "Click Yes to install, No to just run this copy once.",
-                "Whitehat Security - Installer",
-                MessageBoxButtons.YesNoCancel,
-                MessageBoxIcon.Question);
-
-            if (answer == DialogResult.Cancel) return 0;
-            if (answer == DialogResult.Yes)
+            string? prompt = null;
+            if (!Installer.IsAlreadyInstalled())
             {
-                var rc = LaunchSelfElevated("--install");
-                if (rc != 0)
-                {
-                    MessageBox.Show(
-                        rc == -2
-                            ? "Install was cancelled (UAC prompt declined)."
-                            : $"Install failed (exit code {rc}). Check the Windows Application event log for details.",
-                        "Whitehat Security",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                    return rc;
-                }
+                prompt =
+                    $"Install {Installer.ProductName} {Installer.ProductVersion} to:\n\n" +
+                    $"    {Installer.DefaultInstallDir}\n\n" +
+                    "This adds the program to Windows Apps & Features so it can\n" +
+                    "be uninstalled the normal way, and creates Start Menu and\n" +
+                    "Desktop shortcuts.\n\n" +
+                    "Click Yes to install, No to just run this copy once.";
+            }
+            else if (Installer.IsUpgradeAvailableForInstalledCopy(
+                         out var installedVersion))
+            {
+                // Before v7.4.4 this branch did not exist: once anything was
+                // installed, a newer .exe run from Downloads silently started
+                // in portable mode and the installed copy — the one that
+                // actually auto-starts at logon — stayed on the old build.
+                prompt =
+                    $"{Installer.ProductName} {installedVersion?.ToString(3)} is installed at:\n\n" +
+                    $"    {Installer.DefaultInstallDir}\n\n" +
+                    $"This copy is version {Installer.ProductVersion}.\n\n" +
+                    "Click Yes to update the installed copy (it will be\n" +
+                    "restarted), No to just run this copy once.";
+            }
 
-                // Install succeeded. Launch the installed copy in --silent
-                // mode so it goes straight to the system tray. We do NOT
-                // hold a single-instance mutex here, so there is no race
-                // for the launched copy to fight against.
-                var installed = Installer.DefaultInstallExePath;
-                if (File.Exists(installed))
+            if (prompt is not null)
+            {
+                var answer = MessageBox.Show(
+                    prompt,
+                    "Whitehat Security - Installer",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+
+                if (answer == DialogResult.Cancel) return 0;
+                if (answer == DialogResult.Yes)
                 {
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo(installed)
-                        {
-                            Arguments       = "--silent",
-                            UseShellExecute = true,
-                        });
-                    }
-                    catch (Exception ex)
+                    var rc = LaunchSelfElevated("--install");
+                    if (rc != 0)
                     {
                         MessageBox.Show(
-                            $"Installed but could not auto-launch:\n{ex.Message}\n\nLaunch it from the Start Menu.",
+                            rc == -2
+                                ? "Install was cancelled (UAC prompt declined)."
+                                : $"Install failed (exit code {rc}). Check the Windows Application event log for details.",
                             "Whitehat Security",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        return rc;
                     }
+
+                    // Install succeeded. Launch the installed copy in --silent
+                    // mode so it goes straight to the system tray. We do NOT
+                    // hold a single-instance mutex here, so there is no race
+                    // for the launched copy to fight against.
+                    var installed = Installer.DefaultInstallExePath;
+                    if (File.Exists(installed))
+                    {
+                        try
+                        {
+                            Process.Start(new ProcessStartInfo(installed)
+                            {
+                                Arguments       = "--silent",
+                                UseShellExecute = true,
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show(
+                                $"Installed but could not auto-launch:\n{ex.Message}\n\nLaunch it from the Start Menu.",
+                                "Whitehat Security",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }
+                    }
+                    return 0;
                 }
-                return 0;
             }
-            // No → fall through and run from current location
+            // No / nothing to do → fall through and run from current location
         }
 
         // ── Single-instance mutex ───────────────────────────────────────

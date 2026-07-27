@@ -19,9 +19,18 @@
 #     4. Strip the Mark of the Web tag (Unblock-File)
 #     5. Launch the .exe — the install prompt should now appear
 #
-# This is needed because v7.3.x is not yet code-signed with an EV
-# certificate. v7.4 will be signed and SAC will trust it directly
-# without this bypass.
+# This is needed because the release binary is not code-signed with an
+# EV certificate, so Smart App Control has no publisher reputation to
+# go on. Nothing about the program requires the exclusions themselves.
+#
+# If you would rather not add Defender exclusions at all, the supported
+# alternative is to build the exact release commit yourself:
+#
+#   dotnet publish WhitehatSecurity.csproj -c Release -r win-x64 `
+#       --self-contained true
+#
+# A locally produced binary carries no Mark of the Web, so Smart App
+# Control allows it without any exclusion or policy change.
 
 #Requires -RunAsAdministrator
 

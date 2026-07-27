@@ -19,12 +19,6 @@ namespace WhitehatSecurity.Core;
 /// </summary>
 public sealed class NotifyConfig
 {
-    private static readonly HashSet<string> ValidDnsProviders =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            "None", "Cloudflare", "Quad9", "Google", "OpenDNS", "AdGuard",
-        };
-
     /// <summary>
     /// Schema version of the on-disk JSON. Bumped whenever a field is
     /// added/removed/renamed so a future migration step can recognise an
@@ -205,7 +199,10 @@ public sealed class NotifyConfig
         return LoadStrictJson(File.ReadAllText(path));
     }
 
-    private static NotifyConfig LoadStrictJson(string raw)
+    /// <summary>
+    /// Same validation as <see cref="LoadStrict"/> but against JSON text.
+    /// </summary>
+    public static NotifyConfig LoadStrictJson(string raw)
     {
         var loaded = JsonSerializer.Deserialize<NotifyConfig>(raw, JsonOpts)
             ?? throw new InvalidDataException("The configuration is empty.");
@@ -215,10 +212,14 @@ public sealed class NotifyConfig
         if (loaded.SchemaVersion != 1)
             throw new InvalidDataException(
                 $"Unsupported configuration schema {loaded.SchemaVersion}.");
-        if (!ValidDnsProviders.Contains(loaded.DNS_Provider ?? string.Empty))
+        if (!DnsConfiguration.TryNormalizeProviderName(
+                loaded.DNS_Provider, out var provider))
             throw new InvalidDataException(
                 $"Unknown DNS provider '{loaded.DNS_Provider}'.");
-        if (loaded.DNS_Provider is "None" or "OpenDNS")
+        // Store the canonical spelling so the settings combo can select it
+        // and ElevationHelper can look it up.
+        loaded.DNS_Provider = provider;
+        if (!DnsConfiguration.SupportsDoh(provider))
             loaded.DNS_DoH = false;
 
         return loaded;

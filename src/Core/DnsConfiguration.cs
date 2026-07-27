@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace WhitehatSecurity.Core;
 
@@ -23,28 +24,62 @@ public sealed record DnsProviderDefinition(
 /// </summary>
 public static class DnsConfiguration
 {
+    /// <summary>
+    /// The name the dashboard shows for "leave DNS to DHCP". Kept here so the
+    /// settings combo, the config validator and the script builder cannot
+    /// disagree about the spelling.
+    /// </summary>
+    public const string AutomaticProviderName = "None";
+
+    /// <summary>
+    /// Declaration order is the order the settings combo lists the providers.
+    /// Every other list of provider names in the program is derived from this
+    /// one; earlier versions duplicated it in the designer, the config
+    /// validator and two DoH capability checks, and the copies drifted.
+    /// </summary>
+    private static readonly DnsProviderDefinition[] ProviderList =
+    {
+        new("Cloudflare", "1.1.1.1", "1.0.0.1",
+            "https://cloudflare-dns.com/dns-query"),
+        new("Quad9", "9.9.9.9", "149.112.112.112",
+            "https://dns.quad9.net/dns-query"),
+        new("Google", "8.8.8.8", "8.8.4.4",
+            "https://dns.google/dns-query"),
+        new("OpenDNS", "208.67.222.222", "208.67.220.220", null),
+        new("AdGuard", "94.140.14.14", "94.140.15.15",
+            "https://dns.adguard.com/dns-query"),
+    };
+
+    // Case-insensitive on purpose: NotifyConfig accepted "cloudflare" from a
+    // hand-edited JSON file while this lookup was ordinal, so the setting
+    // validated at load time and then failed with -5 on every apply.
     private static readonly IReadOnlyDictionary<string, DnsProviderDefinition>
-        Providers = new Dictionary<string, DnsProviderDefinition>(
-            StringComparer.Ordinal)
-        {
-            ["Cloudflare"] = new(
-                "Cloudflare", "1.1.1.1", "1.0.0.1",
-                "https://cloudflare-dns.com/dns-query"),
-            ["Quad9"] = new(
-                "Quad9", "9.9.9.9", "149.112.112.112",
-                "https://dns.quad9.net/dns-query"),
-            ["Google"] = new(
-                "Google", "8.8.8.8", "8.8.4.4",
-                "https://dns.google/dns-query"),
-            ["OpenDNS"] = new(
-                "OpenDNS", "208.67.222.222", "208.67.220.220", null),
-            ["AdGuard"] = new(
-                "AdGuard", "94.140.14.14", "94.140.15.15",
-                "https://dns.adguard.com/dns-query"),
-        };
+        Providers = ProviderList.ToDictionary(
+            p => p.Name, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Every selectable provider name, "None" first, in display order.
+    /// </summary>
+    public static IReadOnlyList<string> ProviderNames { get; } =
+        new[] { AutomaticProviderName }
+            .Concat(ProviderList.Select(p => p.Name))
+            .ToArray();
+
+    /// <summary>
+    /// Both resolver addresses of every provider that this program can
+    /// configure for DNS-over-HTTPS. The uninstaller uses this to remove the
+    /// DoH registrations it created; hard-coding only the primaries left the
+    /// secondary entries behind once v7.4.3 started configuring both.
+    /// </summary>
+    public static IReadOnlyList<string> ManagedDohAddresses { get; } =
+        ProviderList
+            .Where(p => p.DohTemplate is not null)
+            .SelectMany(p => new[] { p.PrimaryIpv4, p.SecondaryIpv4 })
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
     public static bool TryGetProvider(
-        string providerName,
+        string? providerName,
         out DnsProviderDefinition? provider)
     {
         if (providerName is null)
@@ -55,9 +90,46 @@ public static class DnsConfiguration
         return Providers.TryGetValue(providerName, out provider);
     }
 
+    /// <summary>
+    /// Resolves user- or file-supplied text to the canonical provider name,
+    /// so a config written as "cloudflare" behaves exactly like "Cloudflare".
+    /// </summary>
+    public static bool TryNormalizeProviderName(
+        string? providerName,
+        out string canonical)
+    {
+        if (string.Equals(
+                providerName,
+                AutomaticProviderName,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            canonical = AutomaticProviderName;
+            return true;
+        }
+        if (TryGetProvider(providerName, out var provider)
+            && provider is not null)
+        {
+            canonical = provider.Name;
+            return true;
+        }
+        canonical = AutomaticProviderName;
+        return false;
+    }
+
+    /// <summary>
+    /// True when the provider has a DoH template this program knows how to
+    /// register. "None" and OpenDNS do not.
+    /// </summary>
+    public static bool SupportsDoh(string? providerName) =>
+        TryGetProvider(providerName, out var provider)
+        && provider?.DohTemplate is not null;
+
     public static string BuildProviderScript(string providerName)
     {
-        if (providerName == "None")
+        if (string.Equals(
+                providerName,
+                AutomaticProviderName,
+                StringComparison.OrdinalIgnoreCase))
             return CommonPowerShell + ResetPowerShell;
         if (!TryGetProvider(providerName, out var provider)
             || provider is null)

@@ -63,9 +63,23 @@ public static class ElevationHelper
         }
     }
 
-    internal static int CleanupManagedChanges(Logger? logger = null)
+    /// <summary>
+    /// Reverts everything the program configured system-wide: its firewall
+    /// rules, its hosts-file blocks, and the DNS/DoH settings recorded in the
+    /// ProgramData backup. Called from the elevated uninstall path.
+    /// </summary>
+    public static string BuildCleanupScript()
     {
-        const string script = @"
+        // Both resolvers of every DoH-capable provider. Listing only the
+        // primaries (as v7.4.3 did) orphaned the secondary registrations
+        // that the same version had started creating.
+        var dohAddresses = string.Join(
+            ",",
+            System.Linq.Enumerable.Select(
+                DnsConfiguration.ManagedDohAddresses,
+                a => "'" + a + "'"));
+
+        return @"
 Get-NetFirewallRule -ErrorAction SilentlyContinue |
     Where-Object DisplayName -like 'WHS_*' |
     Remove-NetFirewallRule -ErrorAction Stop
@@ -83,6 +97,15 @@ $backup = Join-Path $dataDir 'dns-backup.json'
 if (Test-Path $backup) {
     $saved = @(Get-Content $backup -Raw | ConvertFrom-Json)
     foreach ($adapter in $saved) {
+        # 'Automatic' records whether the adapter had NO statically
+        # configured name server before we touched it. Deciding from
+        # ServerAddresses instead pinned the DHCP-supplied resolvers as a
+        # static configuration, so uninstalling silently froze the machine
+        # onto whatever DNS the router happened to hand out that day.
+        if ([bool]$adapter.Automatic) {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses
+            continue
+        }
         $addresses = @($adapter.ServerAddresses)
         if ($addresses.Count -gt 0) {
             Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $addresses
@@ -91,7 +114,7 @@ if (Test-Path $backup) {
         }
     }
     if (Get-Command Remove-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
-        '1.1.1.1','9.9.9.9','8.8.8.8','94.140.14.14' | ForEach-Object {
+        @(" + dohAddresses + @") | ForEach-Object {
             $address = $_
             Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue |
                 Where-Object ServerAddress -eq $address |
@@ -100,8 +123,10 @@ if (Test-Path $backup) {
     }
     Remove-Item $dataDir -Recurse -Force
 }";
-        return RunDirect(script, logger);
     }
+
+    internal static int CleanupManagedChanges(Logger? logger = null)
+        => RunDirect(BuildCleanupScript(), logger);
 
     private static int RunDirect(string script, Logger? logger)
     {

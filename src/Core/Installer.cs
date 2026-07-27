@@ -16,6 +16,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using Microsoft.Win32;
 
 namespace WhitehatSecurity.Core;
@@ -23,9 +24,25 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.4.3";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
+
+    /// <summary>
+    /// Read from the assembly rather than hard-coded. The constant used to be
+    /// maintained by hand next to &lt;Version&gt; in the .csproj, the manifest
+    /// and the dashboard caption, and the copies drifted apart between
+    /// releases — the shipped 7.4.3 still described itself as 7.4.0 in its
+    /// application manifest.
+    /// </summary>
+    public static string ProductVersion { get; } = ReadProductVersion();
+
+    private static string ReadProductVersion()
+    {
+        var version = typeof(Installer).Assembly.GetName().Version;
+        return version is null
+            ? "0.0.0"
+            : $"{version.Major}.{version.Minor}.{version.Build}";
+    }
 
     public const string UninstallKeyPath =
         @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\WhitehatSecurity";
@@ -100,6 +117,60 @@ public static class Installer
         catch { return false; }
     }
 
+    /// <summary>
+    /// Version of the copy currently sitting in the install directory, or
+    /// null when nothing is installed. Read from the binary itself rather
+    /// than the Add/Remove Programs DisplayVersion, so a half-finished
+    /// install cannot report a version the file on disk does not have.
+    /// </summary>
+    public static Version? GetInstalledVersion()
+    {
+        try
+        {
+            var exe = DefaultInstallExePath;
+            if (!File.Exists(exe)) return null;
+            var raw = FileVersionInfo
+                .GetVersionInfo(exe).FileVersion;
+            return Version.TryParse(raw, out var parsed) ? parsed : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Version of the .exe that is executing right now.</summary>
+    public static Version RunningVersion { get; } =
+        typeof(Installer).Assembly.GetName().Version
+        ?? new Version(0, 0, 0, 0);
+
+    /// <summary>
+    /// True when an older copy is installed and this (newer) copy is running
+    /// from somewhere else — the case where the user downloaded a fresh
+    /// release but the installed copy would otherwise stay behind forever.
+    /// Versions are compared on major.minor.build; the revision field is
+    /// always 0 in this project's release builds.
+    /// </summary>
+    public static bool IsUpgradeAvailableForInstalledCopy(
+        out Version? installedVersion)
+    {
+        installedVersion = GetInstalledVersion();
+        if (installedVersion is null) return false;
+        if (IsRunningFromInstallDir()) return false;
+        return IsUpgrade(RunningVersion, installedVersion);
+    }
+
+    /// <summary>
+    /// Pure comparison behind <see cref="IsUpgradeAvailableForInstalledCopy"/>,
+    /// exposed so the smoke tests can cover it without an installed copy.
+    /// </summary>
+    public static bool IsUpgrade(Version running, Version installed)
+    {
+        ArgumentNullException.ThrowIfNull(running);
+        ArgumentNullException.ThrowIfNull(installed);
+        return Truncate(running) > Truncate(installed);
+    }
+
+    private static Version Truncate(Version version) =>
+        new(version.Major, version.Minor, Math.Max(version.Build, 0));
+
     // ========================================================================
     //  INSTALL
     // ========================================================================
@@ -117,6 +188,12 @@ public static class Installer
         var dstExe = DefaultInstallExePath;
 
         Directory.CreateDirectory(dstDir);
+
+        // An upgrade over a running copy used to fall through to File.Replace,
+        // which swaps the file on disk but leaves the OLD build running and
+        // still holding the tray icon — so the user saw "installed 7.4.3"
+        // while 7.4.1 kept monitoring. Stop the installed instances first.
+        StopInstalledInstances(logger);
 
         // Copy the binary to a temp name then atomically swap it into place.
         // We try plain Move first; if the destination is locked (the previous
@@ -173,6 +250,58 @@ public static class Installer
         catch (Exception ex)
         {
             logger?.Warn($"Auto-start: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Terminates every process running the binary at the install path,
+    /// skipping this process. Matching is by full image path, so a portable
+    /// copy running from Downloads is never touched.
+    /// </summary>
+    private static void StopInstalledInstances(Logger? logger)
+    {
+        string installedExe;
+        try { installedExe = Path.GetFullPath(DefaultInstallExePath); }
+        catch { return; }
+        if (!File.Exists(installedExe)) return;
+
+        var self = Environment.ProcessId;
+        Process[] candidates;
+        try { candidates = Process.GetProcessesByName("WhitehatSecurity"); }
+        catch (Exception ex)
+        {
+            logger?.Warn($"Process enumeration failed: {ex.Message}");
+            return;
+        }
+
+        foreach (var process in candidates)
+        {
+            try
+            {
+                if (process.Id == self) continue;
+                string? path = null;
+                try { path = process.MainModule?.FileName; }
+                catch { /* exited or inaccessible — skip it */ }
+                if (path is null
+                    || !string.Equals(
+                        Path.GetFullPath(path),
+                        installedExe,
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                logger?.Info(
+                    $"Stopping installed instance PID {process.Id} before upgrade");
+                process.Kill(entireProcessTree: false);
+                process.WaitForExit(5000);
+            }
+            catch (Exception ex)
+            {
+                logger?.Warn(
+                    $"Could not stop PID {process.Id}: {ex.Message}");
+            }
+            finally
+            {
+                try { process.Dispose(); } catch { }
+            }
         }
     }
 
