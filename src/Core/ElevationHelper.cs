@@ -128,19 +128,61 @@ if (Test-Path $backup) {
     internal static int CleanupManagedChanges(Logger? logger = null)
         => RunDirect(BuildCleanupScript(), logger);
 
+    /// <summary>
+    /// Builds the command line that runs <paramref name="scriptPath"/>.
+    ///
+    /// The script is NOT passed with -File. PowerShell refuses to load script
+    /// files when the effective execution policy is Restricted, and a policy
+    /// pushed through Group Policy (MachinePolicy) outranks the
+    /// -ExecutionPolicy switch — so on a managed machine every privileged
+    /// action died with exit code 1 before a single line ran, which is also
+    /// why no error detail was ever written for the caller to log.
+    ///
+    /// Instead a small bootstrap is passed with -EncodedCommand, which
+    /// execution policy does not govern, and it runs the script's text as a
+    /// script block. The bootstrap is a fixed size, so arbitrarily large
+    /// scripts (the hosts blocklists) stay well inside the command-line
+    /// length limit.
+    /// </summary>
+    public static string BuildLauncherArguments(
+        string scriptPath,
+        string? errorPath)
+    {
+        var quotedScript = scriptPath.Replace("'", "''");
+        var bootstrap =
+            "$ErrorActionPreference = 'Stop'\r\n" +
+            "try {\r\n" +
+            "    $text = Get-Content -LiteralPath '" + quotedScript +
+            "' -Raw\r\n" +
+            "    & ([scriptblock]::Create($text))\r\n" +
+            "} catch {\r\n";
+        if (errorPath is not null)
+        {
+            var quotedError = errorPath.Replace("'", "''");
+            bootstrap +=
+                "    ($_ | Out-String) | Set-Content -LiteralPath '" +
+                quotedError + "' -Encoding UTF8\r\n";
+        }
+        bootstrap +=
+            "    exit 1\r\n" +
+            "}\r\n";
+
+        var encoded = Convert.ToBase64String(
+            System.Text.Encoding.Unicode.GetBytes(bootstrap));
+        return $"-NoProfile -NonInteractive -EncodedCommand {encoded}";
+    }
+
     private static int RunDirect(string script, Logger? logger)
     {
         var tmpFile = Path.Combine(
             Path.GetTempPath(), $"whs_cleanup_{Guid.NewGuid():N}.ps1");
         try
         {
-            File.WriteAllText(
-                tmpFile, "$ErrorActionPreference = 'Stop'\r\n" + script);
+            File.WriteAllText(tmpFile, script);
             using var process = Process.Start(new ProcessStartInfo
             {
                 FileName = "powershell.exe",
-                Arguments =
-                    $"-NoProfile -ExecutionPolicy Bypass -File \"{tmpFile}\"",
+                Arguments = BuildLauncherArguments(tmpFile, null),
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
@@ -179,25 +221,12 @@ if (Test-Path $backup) {
 
         try
         {
-            var quotedErrorFile = errorFile.Replace("'", "''");
-            var wrappedScript =
-                "$ErrorActionPreference = 'Stop'\r\n" +
-                "try {\r\n" +
-                script +
-                "\r\n} catch {\r\n" +
-                "    ($_ | Out-String) | Set-Content -LiteralPath '" +
-                quotedErrorFile +
-                "' -Encoding UTF8\r\n" +
-                "    exit 1\r\n" +
-                "}\r\n";
-            File.WriteAllText(
-                tmpFile,
-                wrappedScript);
+            File.WriteAllText(tmpFile, script);
 
             var psi = new ProcessStartInfo
             {
                 FileName        = "powershell.exe",
-                Arguments       = $"-NoProfile -ExecutionPolicy Bypass -File \"{tmpFile}\"",
+                Arguments       = BuildLauncherArguments(tmpFile, errorFile),
                 Verb            = "runas",   // triggers UAC
                 UseShellExecute = true,      // mandatory for Verb=runas
                 WindowStyle     = ProcessWindowStyle.Hidden,
@@ -222,14 +251,25 @@ if (Test-Path $backup) {
             if (code != 0)
             {
                 logger?.Warn($"Elevation: exit {code}");
+                var detail = string.Empty;
                 if (File.Exists(errorFile))
                 {
-                    var detail = File.ReadAllText(errorFile).Trim();
+                    detail = File.ReadAllText(errorFile).Trim();
                     if (detail.Length > 2_000)
                         detail = detail[..2_000] + "...";
-                    if (!string.IsNullOrWhiteSpace(detail))
-                        logger?.Warn($"Elevation detail: {detail}");
                 }
+                if (!string.IsNullOrWhiteSpace(detail))
+                    logger?.Warn($"Elevation detail: {detail}");
+                else
+                    // The script never reached its own error handler. Say so
+                    // instead of logging a bare exit code: a silent "exit 1"
+                    // was the only symptom of the execution-policy failure
+                    // that broke every privileged action on managed machines.
+                    logger?.Warn(
+                        "Elevation detail: the elevated PowerShell exited " +
+                        $"{code} without running the script. Check " +
+                        "'Get-ExecutionPolicy -List' and any AppLocker or " +
+                        "PowerShell constrained-language policy.");
             }
             return code;
         }
@@ -277,12 +317,37 @@ if (Test-Path $backup) {
         return RunElevated(script, logger);
     }
 
-    public static int SetBlockOutboundRule(bool enabled, Logger? logger = null)
+    /// <summary>
+    /// Display names of managed rules that older versions could create but
+    /// this one no longer offers. The install/upgrade path deletes them so a
+    /// user cannot be left with an enforced rule and no way to turn it off.
+    /// </summary>
+    public static IReadOnlyList<string> RetiredFirewallRuleNames { get; } =
+        new[]
+        {
+            "WHS_BlockAllOutbound",
+            "WHS_DNSLock_Out",
+            // Left behind by the broken per-IP rule naming; see
+            // BuildIpRuleScript. Blocks an address the user can no longer
+            // identify, so it has to go.
+            "WHS_Block_",
+        };
+
+    /// <summary>
+    /// Removes the rules listed in <see cref="RetiredFirewallRuleNames"/>.
+    /// Must be called from an already-elevated process; it does not prompt.
+    /// </summary>
+    public static int RemoveRetiredFirewallRules(Logger? logger = null)
     {
-        var script = enabled
-            ? "if (-not (Get-NetFirewallRule -DisplayName 'WHS_BlockAllOutbound' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName 'WHS_BlockAllOutbound' -Direction Outbound -Action Block -Profile Any | Out-Null }"
-            : "Get-NetFirewallRule -DisplayName 'WHS_BlockAllOutbound' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop";
-        return RunElevated(script, logger);
+        var names = string.Join(
+            ",",
+            System.Linq.Enumerable.Select(
+                RetiredFirewallRuleNames, n => "'" + n + "'"));
+        return RunDirect(
+            "@(" + names + @") | ForEach-Object {
+    Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}", logger);
     }
 
     public static int SetBlockPingRule(bool enabled, Logger? logger = null)
@@ -311,37 +376,55 @@ if (Test-Path $backup) {
             logger?.Warn($"BlockIpAddress: rejected non-IP value '{ip}'");
             return -5;
         }
-        var safeIp = parsed.ToString();
-
-        var script = $@"
-$ip = '{safeIp}'
-$ruleIn  = ""WHS_Block_$ip" + @"_In""
-$ruleOut = ""WHS_Block_$ip" + @"_Out""
-if (-not (Get-NetFirewallRule -DisplayName $ruleIn  -ErrorAction SilentlyContinue)) {{
-    New-NetFirewallRule -DisplayName $ruleIn  -Direction Inbound  -Action Block -RemoteAddress $ip -Profile Any | Out-Null
-}}
-if (-not (Get-NetFirewallRule -DisplayName $ruleOut -ErrorAction SilentlyContinue)) {{
-    New-NetFirewallRule -DisplayName $ruleOut -Direction Outbound -Action Block -RemoteAddress $ip -Profile Any | Out-Null
-}}
-";
-        return RunElevated(script, logger);
+        return RunElevated(BuildIpRuleScript(parsed, block: true), logger);
     }
 
     public static int UnblockIpAddress(string ip, Logger? logger = null)
     {
         if (!IPAddress.TryParse(ip, out var parsed))
             return -5;
-        var safeIp = parsed.ToString();
-        var script = $@"
-$ip = '{safeIp}'
-$ruleIn  = ""WHS_Block_$ip" + @"_In""
-$ruleOut = ""WHS_Block_$ip" + @"_Out""
-Get-NetFirewallRule -DisplayName $ruleIn -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule -ErrorAction Stop
-Get-NetFirewallRule -DisplayName $ruleOut -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule -ErrorAction Stop
+        return RunElevated(BuildIpRuleScript(parsed, block: false), logger);
+    }
+
+    /// <summary>
+    /// Per-address inbound and outbound block rules.
+    ///
+    /// The rule names are composed here, not in PowerShell. The previous
+    /// version built them as "WHS_Block_$ip_In", and PowerShell treats the
+    /// underscore as part of the variable name — it expanded $ip_In, which is
+    /// undefined, so BOTH names collapsed to the literal "WHS_Block_". The
+    /// visible effects were: only an inbound rule was ever created, its name
+    /// did not identify the address, blocking a second address silently did
+    /// nothing because the existence check matched the first one, and
+    /// unblocking any address removed that single shared rule. Every one of
+    /// those still reported success.
+    /// </summary>
+    public static string BuildIpRuleScript(IPAddress address, bool block)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+
+        // Canonical form of a parsed address contains only digits, dots,
+        // colons and hex, so it cannot escape a single-quoted PS literal.
+        var safeIp = address.ToString();
+        var ruleIn = $"WHS_Block_{safeIp}_In";
+        var ruleOut = $"WHS_Block_{safeIp}_Out";
+
+        if (!block)
+            return $@"
+foreach ($name in @('{ruleIn}','{ruleOut}')) {{
+    Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction Stop
+}}
 ";
-        return RunElevated(script, logger);
+
+        return $@"
+if (-not (Get-NetFirewallRule -DisplayName '{ruleIn}' -ErrorAction SilentlyContinue)) {{
+    New-NetFirewallRule -DisplayName '{ruleIn}' -Direction Inbound -Action Block -RemoteAddress '{safeIp}' -Profile Any | Out-Null
+}}
+if (-not (Get-NetFirewallRule -DisplayName '{ruleOut}' -ErrorAction SilentlyContinue)) {{
+    New-NetFirewallRule -DisplayName '{ruleOut}' -Direction Outbound -Action Block -RemoteAddress '{safeIp}' -Profile Any | Out-Null
+}}
+";
     }
 
     public static int KillProcessElevated(int pid, Logger? logger = null)

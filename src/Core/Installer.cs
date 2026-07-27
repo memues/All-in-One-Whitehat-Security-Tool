@@ -225,6 +225,16 @@ public static class Installer
         }
         logger?.Info($"Installed binary to {dstExe}");
 
+        // Settings that have been withdrawn leave their enforcement behind.
+        // Removing "Block All Outbound" from the UI without this would strand
+        // anyone who had it switched on: the rule stays in Windows Firewall
+        // with no checkbox left to clear it.
+        var retired = ElevationHelper.RemoveRetiredFirewallRules(logger);
+        if (retired != 0)
+            logger?.Warn($"Retired firewall rule cleanup exited {retired}");
+        else
+            logger?.Info("Checked for retired firewall rules");
+
         // Register in Add/Remove Programs
         WriteUninstallKey(dstExe, dstDir);
         logger?.Info("Registered in Add/Remove Programs");

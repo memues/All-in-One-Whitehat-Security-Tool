@@ -1391,16 +1391,6 @@ public sealed partial class DashboardForm : Form
 
             case "FW_BlockInbound":   await TogglePrivilegedAsync(cb, () => _config.FW_BlockInbound   = cb.Checked,
                 () => ElevationHelper.SetBlockInboundRule(cb.Checked, _logger)); break;
-            case "FW_BlockOutbound":
-                if (cb.Checked && MessageBox.Show(
-                    "WARNING: This blocks ALL outgoing traffic.\nApplications may stop working. Continue?",
-                    "Block Outbound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
-                {
-                    SetCheckedWithoutHandler(cb, false); return;
-                }
-                await TogglePrivilegedAsync(cb, () => _config.FW_BlockOutbound = cb.Checked,
-                    () => ElevationHelper.SetBlockOutboundRule(cb.Checked, _logger));
-                break;
             case "FW_BlockPing":      await TogglePrivilegedAsync(cb, () => _config.FW_BlockPing      = cb.Checked,
                 () => ElevationHelper.SetBlockPingRule(cb.Checked, _logger)); break;
             case "FW_BlockLAN":
@@ -1773,7 +1763,6 @@ public sealed partial class DashboardForm : Form
                 "FW_PrivateProfile"        => _config.FW_PrivateProfile,
                 "FW_PublicProfile"         => _config.FW_PublicProfile,
                 "FW_BlockInbound"          => _config.FW_BlockInbound,
-                "FW_BlockOutbound"         => _config.FW_BlockOutbound,
                 "FW_BlockPing"             => _config.FW_BlockPing,
                 "FW_BlockLAN"              => _config.FW_BlockLAN,
                 "FW_BlockDevices"          => _config.FW_BlockDevices,

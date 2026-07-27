@@ -144,7 +144,8 @@ CLI flags:
 | Firewall IP block + unblock from alert details       | ✓ |
 | Audible alert (`BeepOnAlert`)                        | ✓ |
 | Alert detail toggle (`ShowThreatDetails`)            | ✓ |
-| 3 firewall profile toggles + 5 firewall block rules  | ✓ |
+| 3 firewall profile toggles + 4 firewall block rules  | ✓ |
+| Block-all-outbound rule                              | Removed in v7.4.5 — it cuts the machine off the network, including this program's own checks. Any rule left by an earlier version is deleted on upgrade |
 | Hosts-based blocklists (Trackers / Malware / Telemetry) | ✓ |
 | Routed-adapter DNS switching with verification, repair, and transactional rollback | ✓ |
 | DNS-over-HTTPS for both provider resolvers (Windows 11) | ✓ |

@@ -185,6 +185,95 @@ Run("Uninstall cleanup restores automatic DNS and both DoH resolvers", () =>
     AssertPowerShellParses(script);
 });
 
+Run("Privileged scripts run under a Restricted execution policy", () =>
+{
+    // Regression test for the failure that broke every privileged action on
+    // a Group-Policy-managed machine: PowerShell will not load a .ps1 when
+    // MachinePolicy is Restricted, and that policy outranks the
+    // -ExecutionPolicy switch, so the launcher must not use -File.
+    var arguments = ElevationHelper.BuildLauncherArguments(
+        @"C:\example\script.ps1", @"C:\example\error.txt");
+    Contains("-EncodedCommand", arguments);
+    DoesNotContain("-File", arguments);
+
+    var directory = Path.Combine(
+        Path.GetTempPath(), $"whs-elev-test-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    var scriptPath = Path.Combine(directory, "payload.ps1");
+    var markerPath = Path.Combine(directory, "marker.txt");
+    var errorPath = Path.Combine(directory, "error.txt");
+    try
+    {
+        // Run the launcher for real, unelevated, against whatever policy
+        // this machine has. Under the old -File launcher this exits 1
+        // without ever creating the marker on a Restricted machine.
+        File.WriteAllText(
+            scriptPath,
+            "Set-Content -LiteralPath '"
+            + markerPath.Replace("'", "''")
+            + "' -Value 'ran' -Encoding UTF8\r\n");
+        Equal(0, RunLauncher(scriptPath, errorPath));
+        Equal("ran", File.ReadAllText(markerPath).Trim());
+        Equal(false, File.Exists(errorPath));
+
+        // A failing script must surface its reason through the error file,
+        // which is what makes a real failure diagnosable in the log.
+        File.WriteAllText(
+            scriptPath, "throw 'deliberate smoke-test failure'\r\n");
+        Equal(1, RunLauncher(scriptPath, errorPath));
+        Equal(true, File.Exists(errorPath));
+        Contains(
+            "deliberate smoke-test failure",
+            File.ReadAllText(errorPath));
+
+        // Exit codes chosen by the script itself must survive; the DoH path
+        // reports "cmdlet unavailable" as exit 6.
+        File.WriteAllText(scriptPath, "exit 6\r\n");
+        Equal(6, RunLauncher(scriptPath, errorPath));
+    }
+    finally
+    {
+        try { Directory.Delete(directory, recursive: true); } catch { }
+    }
+});
+
+Run("Per-IP firewall rules are named after the address", () =>
+{
+    var address = System.Net.IPAddress.Parse("203.0.113.5");
+    var block = ElevationHelper.BuildIpRuleScript(address, block: true);
+
+    // "WHS_Block_$ip_In" made PowerShell expand the undefined $ip_In, so
+    // both names collapsed to "WHS_Block_": one misnamed inbound rule, no
+    // outbound rule, and every later address silently skipped.
+    Contains("'WHS_Block_203.0.113.5_In'", block);
+    Contains("'WHS_Block_203.0.113.5_Out'", block);
+    DoesNotContain("$ip", block);
+    Contains("-Direction Inbound", block);
+    Contains("-Direction Outbound", block);
+
+    var unblock = ElevationHelper.BuildIpRuleScript(address, block: false);
+    Contains("'WHS_Block_203.0.113.5_In'", unblock);
+    Contains("'WHS_Block_203.0.113.5_Out'", unblock);
+    DoesNotContain("New-NetFirewallRule", unblock);
+
+    AssertPowerShellParses(block);
+    AssertPowerShellParses(unblock);
+
+    var v6 = ElevationHelper.BuildIpRuleScript(
+        System.Net.IPAddress.Parse("2001:db8::1"), block: true);
+    Contains("'WHS_Block_2001:db8::1_In'", v6);
+    AssertPowerShellParses(v6);
+
+    // The retired-rule sweep has to clear the stray rule older builds left.
+    Equal(
+        true,
+        ElevationHelper.RetiredFirewallRuleNames.Contains("WHS_Block_"));
+    Equal(
+        true,
+        ElevationHelper.RetiredFirewallRuleNames.Contains(
+            "WHS_BlockAllOutbound"));
+});
+
 Run("Version metadata agrees across the project", () =>
 {
     var root = FindRepositoryRoot();
@@ -675,6 +764,36 @@ static void AssertPowerShellParses(string script)
     {
         try { File.Delete(path); } catch { }
     }
+}
+
+/// <summary>
+/// Runs the production launcher command line unelevated and returns the
+/// exit code. Deletes any stale error file first so its presence after the
+/// run is meaningful.
+/// </summary>
+static int RunLauncher(string scriptPath, string errorPath)
+{
+    try { File.Delete(errorPath); } catch { }
+    var startInfo = new ProcessStartInfo
+    {
+        FileName = "powershell.exe",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+    };
+    foreach (var argument in ElevationHelper
+                 .BuildLauncherArguments(scriptPath, errorPath)
+                 .Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        startInfo.ArgumentList.Add(argument);
+
+    using var process = Process.Start(startInfo)
+        ?? throw new InvalidOperationException(
+            "Could not start the launcher.");
+    if (!process.WaitForExit(30_000))
+    {
+        try { process.Kill(); } catch { }
+        throw new TimeoutException("The launcher timed out.");
+    }
+    return process.ExitCode;
 }
 
 /// <summary>

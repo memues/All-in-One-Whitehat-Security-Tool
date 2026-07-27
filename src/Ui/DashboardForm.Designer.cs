@@ -793,7 +793,6 @@ public sealed partial class DashboardForm
         // -------- Firewall Block Rules --------
         y = AddSectionHeader(page, "Firewall Block Rules  [admin]", y + 8);
         y = AddSettingCheckbox(page, "FW_BlockInbound",  "Block All Inbound",   "Create a managed rule that blocks all incoming traffic until removed", _config.FW_BlockInbound,  y);
-        y = AddSettingCheckbox(page, "FW_BlockOutbound", "Block All Outbound",  "Block all outgoing connections (strict — may break apps)", _config.FW_BlockOutbound, y);
         y = AddSettingCheckbox(page, "FW_BlockPing",     "Block ICMP Ping",     "Block incoming ping requests",                              _config.FW_BlockPing,     y);
         y = AddSettingCheckbox(page, "FW_BlockLAN",      "Block LAN Traffic",   "Block all local network traffic",                           _config.FW_BlockLAN,      y);
         y = AddSettingCheckbox(page, "FW_BlockDevices",  "Block Device Discovery", "Block SMB / NetBIOS / LLMNR / mDNS",                     _config.FW_BlockDevices,  y);

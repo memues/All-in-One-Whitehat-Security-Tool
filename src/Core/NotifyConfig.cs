@@ -65,10 +65,14 @@ public sealed class NotifyConfig
     [JsonPropertyName("FW_PrivateProfile")] public bool FW_PrivateProfile { get; set; } = true;
     [JsonPropertyName("FW_PublicProfile")]  public bool FW_PublicProfile  { get; set; } = true;
 
-    // ---------------- Firewall block rules (5) ----------------
+    // ---------------- Firewall block rules (4) ----------------
 
+    // FW_BlockOutbound was removed in v7.4.5. A blanket outbound block takes
+    // the machine off the network — including this program's own update and
+    // reputation lookups — and there is no safe way to offer it from a
+    // checkbox. Any rule a previous version left behind is deleted during
+    // install/upgrade; see Installer.RemoveRetiredFirewallRules.
     [JsonPropertyName("FW_BlockInbound")]  public bool FW_BlockInbound  { get; set; }
-    [JsonPropertyName("FW_BlockOutbound")] public bool FW_BlockOutbound { get; set; }
     [JsonPropertyName("FW_BlockPing")]     public bool FW_BlockPing     { get; set; }
     [JsonPropertyName("FW_BlockLAN")]      public bool FW_BlockLAN      { get; set; }
     [JsonPropertyName("FW_BlockDevices")]  public bool FW_BlockDevices  { get; set; }
@@ -114,7 +118,6 @@ public sealed class NotifyConfig
         FW_PrivateProfile        = true,
         FW_PublicProfile         = true,
         FW_BlockInbound          = false,
-        FW_BlockOutbound         = false,
         FW_BlockPing             = false,
         FW_BlockLAN              = false,
         FW_BlockDevices          = false,
