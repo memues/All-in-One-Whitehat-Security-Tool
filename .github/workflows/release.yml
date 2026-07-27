@@ -15,15 +15,17 @@ jobs:
 
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
 
       - name: Restore
-        run: dotnet restore WhitehatSecurity.csproj
+        run: |
+          dotnet restore WhitehatSecurity.csproj
+          dotnet restore tests/WhitehatSecurity.SmokeTests/WhitehatSecurity.SmokeTests.csproj
 
       - name: Run smoke tests
         run: dotnet run --project tests/WhitehatSecurity.SmokeTests/WhitehatSecurity.SmokeTests.csproj -c Release --no-restore
