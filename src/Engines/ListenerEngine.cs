@@ -64,54 +64,25 @@ public sealed class ListenerEngine : IMonitorEngine
 
     private static string Key(ListenerRecord r) => $"{r.LocalIp}:{r.LocalPort}|{r.Pid}";
 
+    /// <summary>
+    /// Listening sockets in both address families. Until v7.4.8 only AF_INET
+    /// was queried, which missed every IPv6 listener — and because a
+    /// dual-stack socket bound to :: appears only in the IPv6 table, that
+    /// included most services that accept connections from the network.
+    /// </summary>
     private static IEnumerable<ListenerRecord> EnumerateListeners()
     {
-        const uint ErrorInsufficientBuffer = 122;
-        int size = 0;
-        var sizeRc = NativeMethods.GetExtendedTcpTable(
-            IntPtr.Zero, ref size, false,
-            NativeMethods.AF_INET,
-            TcpTableClass.OwnerPidListener, 0);
-
-        if (sizeRc is not (0 or ErrorInsufficientBuffer)) yield break;
-        if (size <= 0) yield break;
-
-        IntPtr buffer = Marshal.AllocHGlobal(size);
-        try
+        foreach (var row in TcpTable.Query(TcpTableClass.OwnerPidListener))
         {
-            uint rc = NativeMethods.GetExtendedTcpTable(
-                buffer, ref size, false,
-                NativeMethods.AF_INET,
-                TcpTableClass.OwnerPidListener, 0);
+            // Loopback-only listeners are never remotely reachable. A
+            // listener on 0.0.0.0 or :: is, so those are kept.
+            if (IPAddress.IsLoopback(row.LocalAddress)) continue;
 
-            if (rc != 0) yield break;
-
-            int rowCount = Marshal.ReadInt32(buffer);
-            int rowSize  = Marshal.SizeOf<MibTcpRowOwnerPid>();
-            IntPtr rowPtr = IntPtr.Add(buffer, sizeof(int));
-
-            for (int i = 0; i < rowCount; i++)
-            {
-                var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
-                rowPtr  = IntPtr.Add(rowPtr, rowSize);
-
-                var local = new IPAddress(BitConverter.GetBytes(row.LocalAddr)).ToString();
-                // Skip loopback-only listeners — they're never remotely reachable
-                if (local.StartsWith("127.") || local == "::1") continue;
-
-                int port = ((int)((row.LocalPort & 0xFF) << 8))
-                         |  (int)((row.LocalPort & 0xFF00) >> 8);
-
-                yield return new ListenerRecord(
-                    LocalIp:     local,
-                    LocalPort:   port,
-                    Pid:         (int)row.OwningPid,
-                    ProcessName: SafeProcessName((int)row.OwningPid));
-            }
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
+            yield return new ListenerRecord(
+                LocalIp:     row.LocalAddress.ToString(),
+                LocalPort:   row.LocalPort,
+                Pid:         row.Pid,
+                ProcessName: SafeProcessName(row.Pid));
         }
     }
 

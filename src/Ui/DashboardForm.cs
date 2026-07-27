@@ -1377,6 +1377,9 @@ public sealed partial class DashboardForm : Form
             case "Security":   _config.Security   = cb.Checked; break;
             case "RDP":        _config.RDP        = cb.Checked; break;
             case "Hosts":      _config.Hosts      = cb.Checked; break;
+            case "HiddenProcess": _config.HiddenProcess = cb.Checked; break;
+            case "Memory":     _config.Memory     = cb.Checked; break;
+            case "BYOVD":      _config.BYOVD      = cb.Checked; break;
 
             case "ShowThreatDetails":        _config.ShowThreatDetails        = cb.Checked; break;
             case "EnableToastNotifications": _config.EnableToastNotifications = cb.Checked; break;
@@ -1744,6 +1747,9 @@ public sealed partial class DashboardForm : Form
         dst.Security                 = src.Security;
         dst.RDP                      = src.RDP;
         dst.Hosts                    = src.Hosts;
+        dst.HiddenProcess            = src.HiddenProcess;
+        dst.Memory                   = src.Memory;
+        dst.BYOVD                    = src.BYOVD;
         dst.ShowThreatDetails        = src.ShowThreatDetails;
         dst.EnableToastNotifications = src.EnableToastNotifications;
         dst.BeepOnAlert              = src.BeepOnAlert;
@@ -1773,6 +1779,9 @@ public sealed partial class DashboardForm : Form
                 "Security"                 => _config.Security,
                 "RDP"                      => _config.RDP,
                 "Hosts"                    => _config.Hosts,
+                "HiddenProcess"            => _config.HiddenProcess,
+                "Memory"                   => _config.Memory,
+                "BYOVD"                    => _config.BYOVD,
                 "ShowThreatDetails"        => _config.ShowThreatDetails,
                 "EnableToastNotifications" => _config.EnableToastNotifications,
                 "BeepOnAlert"              => _config.BeepOnAlert,

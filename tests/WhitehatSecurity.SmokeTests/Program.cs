@@ -212,6 +212,97 @@ Run("DNS and Secure DNS cover IPv6 where IPv6 actually routes", () =>
     AssertPowerShellParses(enable);
 });
 
+Run("Every engine category has a settings toggle", () =>
+{
+    // The three behavioural engines raised categories IsCategoryEnabled had
+    // never heard of. They fell through to the unknown-category default, so
+    // they always fired and no checkbox could silence them.
+    var config = NotifyConfig.Defaults();
+    foreach (var category in new[]
+             {
+                 "Firmware", "Driver", "Service", "Connection", "Process",
+                 "Listener", "Registry", "Security", "RDP", "Hosts",
+                 "HiddenProcess", "Memory", "BYOVD",
+             })
+    {
+        Equal(true, NotifyConfig.AllCategories.Contains(category));
+        // A category with a real toggle must follow it in both directions;
+        // one that falls through to the default cannot be switched off.
+        var probe = NotifyConfig.Defaults();
+        SetCategory(probe, category, false);
+        Equal(false, probe.IsCategoryEnabled(category));
+        SetCategory(probe, category, true);
+        Equal(true, probe.IsCategoryEnabled(category));
+    }
+    Equal(13, NotifyConfig.AllCategories.Count);
+
+    // An engine added later must still raise rather than be muted silently.
+    Equal(true, config.IsCategoryEnabled("SomethingAddedLater"));
+});
+
+Run("Alert history survives a restart", () =>
+{
+    var path = Path.Combine(
+        Path.GetTempPath(), $"whs-history-{Guid.NewGuid():N}.jsonl");
+    try
+    {
+        var store = new AlertHistoryStore(path);
+        Equal(0, store.Load().Count);
+
+        var payload = new Dictionary<string, string>
+        {
+            ["RegistryPath"] = @"HKEY_CURRENT_USER\Software\Example",
+            [RegistryRollbackService.PayloadMetadataKey] = "encoded-payload",
+        };
+        store.Append(new Alert(
+            new DateTime(2026, 7, 27, 19, 40, 0),
+            "Registry",
+            "REGISTRY ADDED",
+            "Run key gained a value",
+            AlertSeverity.High,
+            ProcessName: "explorer",
+            ProcessId: 1234,
+            RemoteIp: "203.0.113.5",
+            RemotePort: 443,
+            Path: @"C:\example\thing.exe",
+            Extra: payload));
+
+        // A truncated final record after a hard power-off must not cost the
+        // user the rest of their history.
+        File.AppendAllText(path, "{not-json" + Environment.NewLine);
+        store.Append(new Alert(
+            new DateTime(2026, 7, 27, 19, 41, 0),
+            "Memory", "EXECUTABLE PRIVATE MEMORY", "rwx",
+            AlertSeverity.Crit));
+
+        var loaded = new AlertHistoryStore(path).Load();
+        Equal(2, loaded.Count);
+        Equal("REGISTRY ADDED", loaded[0].Title);
+        Equal(AlertSeverity.High, loaded[0].Severity);
+        Equal(1234, loaded[0].ProcessId ?? 0);
+        Equal("203.0.113.5", loaded[0].RemoteIp);
+        Equal(@"C:\example\thing.exe", loaded[0].Path);
+        // The remediation payload has to survive, or "Undo registry change"
+        // stops working after a restart.
+        Equal(
+            "encoded-payload",
+            loaded[0].Extra?[RegistryRollbackService.PayloadMetadataKey]);
+        Equal(AlertSeverity.Crit, loaded[1].Severity);
+
+        // Seeding the sink must not re-fire notifications for old alerts.
+        var sink = new DashboardSink();
+        var raised = 0;
+        sink.AlertReceived += _ => raised++;
+        sink.Seed(loaded);
+        Equal(2, sink.Count);
+        Equal(0, raised);
+    }
+    finally
+    {
+        try { File.Delete(path); } catch { }
+    }
+});
+
 Run("DNS provider names come from a single catalog", () =>
 {
     Equal(
@@ -901,6 +992,18 @@ static int RunLauncher(string scriptPath, string errorPath)
 /// Walks up from the test binary to the directory holding
 /// WhitehatSecurity.csproj. Returns null when the sources are not present.
 /// </summary>
+/// <summary>
+/// Sets a notification category by its key name, the same way the Settings
+/// page does, so the test exercises the real property behind each toggle.
+/// </summary>
+static void SetCategory(NotifyConfig config, string category, bool value)
+{
+    var property = typeof(NotifyConfig).GetProperty(category)
+        ?? throw new MissingMemberException(
+            $"NotifyConfig has no property for category '{category}'.");
+    property.SetValue(config, value);
+}
+
 static string? FindRepositoryRoot()
 {
     var directory = new DirectoryInfo(AppContext.BaseDirectory);

@@ -47,6 +47,15 @@ public sealed class NotifyConfig
     [JsonPropertyName("RDP")]        public bool RDP        { get; set; }
     [JsonPropertyName("Hosts")]      public bool Hosts      { get; set; }
 
+    // The three behavioural engines emitted categories that IsCategoryEnabled
+    // did not know about. They fell through to the "unknown → allow" default,
+    // so they always fired and no Settings checkbox could silence them — 13
+    // alert categories behind a 10-category settings page.
+    [JsonPropertyName("HiddenProcess")]
+    public bool HiddenProcess { get; set; }
+    [JsonPropertyName("Memory")]     public bool Memory     { get; set; }
+    [JsonPropertyName("BYOVD")]      public bool BYOVD      { get; set; }
+
     // ---------------- Display / behavior (3) ----------------
 
     [JsonPropertyName("ShowThreatDetails")]
@@ -109,6 +118,9 @@ public sealed class NotifyConfig
         Security                 = true,
         RDP                      = true,
         Hosts                    = true,
+        HiddenProcess            = true,
+        Memory                   = true,
+        BYOVD                    = true,
         ShowThreatDetails        = false,
         // Toasts are opt-in: a fresh install should be quiet. The user can
         // enable them from Settings whenever they want the popups back.
@@ -146,7 +158,23 @@ public sealed class NotifyConfig
         "Security"   => Security,
         "RDP"        => RDP,
         "Hosts"      => Hosts,
+        "HiddenProcess" => HiddenProcess,
+        "Memory"     => Memory,
+        "BYOVD"      => BYOVD,
+        // An engine added later must not be silently muted, so an unknown
+        // category still raises. AllCategories keeps the settings page and
+        // this switch honest about which ones exist.
         _            => true,
+    };
+
+    /// <summary>
+    /// Every category the switch above understands, in settings-page order.
+    /// </summary>
+    public static IReadOnlyList<string> AllCategories { get; } = new[]
+    {
+        "Firmware", "Driver", "Service", "Connection", "Process",
+        "Listener", "Registry", "Security", "RDP", "Hosts",
+        "HiddenProcess", "Memory", "BYOVD",
     };
 
     public static bool DefaultForCategory(string category)

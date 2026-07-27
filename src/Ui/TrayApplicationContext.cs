@@ -23,6 +23,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly Logger           _logger;
     private readonly MonitorHost      _host;
     private readonly DashboardSink    _dashboardSink;
+    private readonly AlertHistoryStore _history;
     private readonly ConsoleSink      _consoleSink;
     private readonly string           _configPath;
     private readonly EventWaitHandle  _instanceSignal;
@@ -69,8 +70,17 @@ public sealed class TrayApplicationContext : ApplicationContext
         // exists. Always registered so alerts are buffered even before the
         // user opens the dashboard.
         _dashboardSink = new DashboardSink();
+        // Replay saved history first so the Alerts page opens with what the
+        // machine has actually seen, not just what happened since the last
+        // restart. Seeding before Start() means the backlog is already in
+        // place whenever the dashboard is opened.
+        _history = new AlertHistoryStore(Paths.AlertHistoryPath);
+        try { _dashboardSink.Seed(_history.Load()); }
+        catch (Exception ex) { _logger.Warn($"Alert history: {ex.Message}"); }
+
         host.AddSink(_dashboardSink);
         host.AddSink(_consoleSink);
+        host.AddSink(new AlertHistorySink(_history));
         host.AddSink(new ToastNotifier(_tray, _config, _uiInvoker));
 
         host.Start();
@@ -274,6 +284,22 @@ public sealed class DashboardSink : IAlertSink
                 _buffer.RemoveRange(0, _buffer.Count - 5000);
         }
         try { AlertReceived?.Invoke(alert); } catch { }
+    }
+
+    /// <summary>
+    /// Pre-loads history restored from disk. Does not raise AlertReceived:
+    /// these are not new events, and re-notifying about them on every
+    /// startup would be worse than not keeping history at all.
+    /// </summary>
+    public void Seed(System.Collections.Generic.IEnumerable<Alert> alerts)
+    {
+        ArgumentNullException.ThrowIfNull(alerts);
+        lock (_lock)
+        {
+            _buffer.InsertRange(0, alerts);
+            if (_buffer.Count > 5000)
+                _buffer.RemoveRange(0, _buffer.Count - 5000);
+        }
     }
 
     public void Clear()

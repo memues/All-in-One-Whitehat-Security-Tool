@@ -46,6 +46,11 @@ public static class Paths
     public static string BaselineDir => Path.Combine(DataDir, "Baselines");
     public static string QuarantineDir => Path.Combine(DataDir, "Quarantine");
     public static string RemediationDir => Path.Combine(DataDir, "Remediation");
+    /// <summary>
+    /// Durable alert history replayed into the Alerts page at startup.
+    /// </summary>
+    public static string AlertHistoryPath =>
+        Path.Combine(DataDir, "alert-history.jsonl");
 
     private static string ResolveDataDir()
     {

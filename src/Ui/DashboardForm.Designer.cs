@@ -778,6 +778,19 @@ public sealed partial class DashboardForm
         foreach (var c in categories)
             y = AddSettingCheckbox(page, c.Key, c.Label, c.Desc, _config.IsCategoryEnabled(c.Key), y);
 
+        // The behavioural engines raise their own categories. Before v7.4.8
+        // they were absent from this page, so their alerts could not be
+        // turned off at all.
+        y = AddSectionHeader(page, "Behavioural Detection", y + 8);
+        var behavioural = new (string Key, string Label, string Desc)[]
+        {
+            ("HiddenProcess", "Hidden Processes",       "Processes present in the kernel list but hidden from the normal API"),
+            ("Memory",        "Executable Private Memory", "Read-write-execute private memory — the fingerprint of injected code"),
+            ("BYOVD",         "Vulnerable Drivers",     "Loaded drivers matching known bring-your-own-vulnerable-driver names"),
+        };
+        foreach (var c in behavioural)
+            y = AddSettingCheckbox(page, c.Key, c.Label, c.Desc, _config.IsCategoryEnabled(c.Key), y);
+
         // -------- Display section --------
         y = AddSectionHeader(page, "Display & Behavior", y + 8);
         y = AddSettingCheckbox(page, "ShowThreatDetails",        "Detailed Threat Info",          "Show full details and severity levels for threats", _config.ShowThreatDetails,        y);

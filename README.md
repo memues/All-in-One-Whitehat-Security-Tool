@@ -135,6 +135,9 @@ CLI flags:
 | Single-instance activation (shortcuts reopen the running dashboard) | ✓ |
 | Status page **live** posture row (Defender / Firewall / UAC / RDP / SecureBoot / TPM / HVCI / BitLocker) | ✓ |
 | Alerts page search + severity & category filters     | ✓ |
+| Alert history persisted across restarts              | ✓ — replayed into the Alerts page at startup from `alert-history.jsonl`, remediation payloads included |
+| 13 alert categories, each with its own settings toggle | ✓ |
+| TCP monitoring across IPv4 **and** IPv6              | ✓ — a dual-stack socket bound to `::` appears only in the IPv6 table, so IPv4-only enumeration missed most listeners |
 | Alerts page export to CSV / JSON                     | ✓ |
 | Alerts page sortable column headers                  | ✓ |
 | Category-aware alert investigation and response      | ✓ |
