@@ -240,6 +240,35 @@ Run("Every engine category has a settings toggle", () =>
     Equal(true, config.IsCategoryEnabled("SomethingAddedLater"));
 });
 
+Run("Upgrading a config cannot silently disable a detection", () =>
+{
+    // A bool absent from JSON deserializes to false. When v7.4.8 gave the
+    // behavioural engines real categories, every existing config came back
+    // with HiddenProcess, Memory and BYOVD switched off — they had always
+    // fired before, and nothing told the user they had stopped.
+    var legacy = NotifyConfig.LoadStrictJson(
+        """{"SchemaVersion":1,"Firmware":true,"DNS_Provider":"None"}""");
+    Equal(true, legacy.IsCategoryEnabled("HiddenProcess"));
+    Equal(true, legacy.IsCategoryEnabled("Memory"));
+    Equal(true, legacy.IsCategoryEnabled("BYOVD"));
+    Equal(NotifyConfig.CurrentSchemaVersion, legacy.SchemaVersion);
+
+    // 7.4.8 and 7.4.9 wrote the wrong value into the file itself, so a
+    // schema-1 file that already says false has to be corrected too.
+    var damaged = NotifyConfig.LoadStrictJson(
+        """{"SchemaVersion":1,"HiddenProcess":false,"Memory":false,"BYOVD":false}""");
+    Equal(true, damaged.IsCategoryEnabled("Memory"));
+
+    // Once migrated, an explicit choice is honoured.
+    var chosen = NotifyConfig.LoadStrictJson(
+        """{"SchemaVersion":2,"HiddenProcess":false}""");
+    Equal(false, chosen.IsCategoryEnabled("HiddenProcess"));
+    Equal(true, chosen.IsCategoryEnabled("Memory"));
+
+    Throws(() => NotifyConfig.LoadStrictJson(
+        """{"SchemaVersion":99}"""));
+});
+
 Run("Alert history survives a restart", () =>
 {
     var path = Path.Combine(

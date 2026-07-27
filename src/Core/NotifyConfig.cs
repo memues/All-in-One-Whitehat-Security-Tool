@@ -27,7 +27,13 @@ public sealed class NotifyConfig
     /// that did not write this key.
     /// </summary>
     [JsonPropertyName("SchemaVersion")]
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
+
+    /// <summary>
+    /// Schema 2 added the three behavioural notification categories. Files
+    /// still on schema 1 are migrated on load rather than rejected.
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
 
     // ---------------- Notification categories (10) ----------------
 
@@ -51,10 +57,17 @@ public sealed class NotifyConfig
     // did not know about. They fell through to the "unknown → allow" default,
     // so they always fired and no Settings checkbox could silence them — 13
     // alert categories behind a 10-category settings page.
+    //
+    // These default to true in C# as well as in Defaults(). A bool property
+    // absent from an existing JSON file deserializes to false, so without
+    // the initializer every config written before v7.4.8 came back with all
+    // three behavioural detections switched off — silently, since they had
+    // always fired before. See the schema-2 migration in LoadStrictJson for
+    // files that already recorded the wrong value.
     [JsonPropertyName("HiddenProcess")]
-    public bool HiddenProcess { get; set; }
-    [JsonPropertyName("Memory")]     public bool Memory     { get; set; }
-    [JsonPropertyName("BYOVD")]      public bool BYOVD      { get; set; }
+    public bool HiddenProcess { get; set; } = true;
+    [JsonPropertyName("Memory")]     public bool Memory     { get; set; } = true;
+    [JsonPropertyName("BYOVD")]      public bool BYOVD      { get; set; } = true;
 
     // ---------------- Display / behavior (3) ----------------
 
@@ -240,9 +253,22 @@ public sealed class NotifyConfig
 
         if (loaded.SchemaVersion == 0)
             loaded.SchemaVersion = 1;
-        if (loaded.SchemaVersion != 1)
+        if (loaded.SchemaVersion is < 1 or > CurrentSchemaVersion)
             throw new InvalidDataException(
                 $"Unsupported configuration schema {loaded.SchemaVersion}.");
+
+        if (loaded.SchemaVersion < 2)
+        {
+            // v7.4.8 gave the behavioural engines real categories. A schema-1
+            // file either has no value for them (deserializing to false) or a
+            // false written by 7.4.8/7.4.9 before this migration existed.
+            // Either way the user never chose to switch these off, and a
+            // detection that silently stops is worse than a noisy one.
+            loaded.HiddenProcess = true;
+            loaded.Memory = true;
+            loaded.BYOVD = true;
+            loaded.SchemaVersion = CurrentSchemaVersion;
+        }
         if (!DnsConfiguration.TryNormalizeProviderName(
                 loaded.DNS_Provider, out var provider))
             throw new InvalidDataException(
