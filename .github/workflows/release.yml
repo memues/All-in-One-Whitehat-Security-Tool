@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore WhitehatSecurity.csproj
+
+      - name: Run smoke tests
+        run: dotnet run --project tests/WhitehatSecurity.SmokeTests/WhitehatSecurity.SmokeTests.csproj -c Release --no-restore
+
+      - name: Publish self-contained Windows executable
+        run: dotnet publish WhitehatSecurity.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifacts/publish
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $assetName = "WhitehatSecurity-$version-win-x64.exe"
+          Copy-Item "artifacts/publish/WhitehatSecurity.exe" "artifacts/$assetName"
+          $hash = (Get-FileHash "artifacts/$assetName" -Algorithm SHA256).Hash
+          "$hash  $assetName" |
+            Set-Content "artifacts/WhitehatSecurity-$version-win-x64.sha256.txt" -Encoding ascii
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          gh release create $env:GITHUB_REF_NAME `
+            "artifacts/WhitehatSecurity-$version-win-x64.exe" `
+            "artifacts/WhitehatSecurity-$version-win-x64.sha256.txt" `
+            --verify-tag `
+            --latest `
+            --generate-notes `
+            --title "Whitehat Security $env:GITHUB_REF_NAME"
