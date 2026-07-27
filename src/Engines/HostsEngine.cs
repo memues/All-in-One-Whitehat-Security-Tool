@@ -18,40 +18,60 @@ public sealed class HostsEngine : IMonitorEngine
         Environment.GetFolderPath(Environment.SpecialFolder.System),
         "drivers", "etc", "hosts");
 
-    private string? _baselineHash;
+    private FileState _baseline;
 
-    public void Initialize() => _baselineHash = HashFileSafe(_path);
+    public void Initialize() => _baseline = ReadState(_path);
 
     public IEnumerable<Alert> Scan()
     {
-        var current = HashFileSafe(_path);
-        if (current is null || current == _baselineHash) yield break;
+        var current = ReadState(_path);
+        if (current.Kind == FileStateKind.Unreadable) yield break;
+        if (current == _baseline) yield break;
 
-        var prev = _baselineHash;
-        _baselineHash = current;
+        var previous = _baseline;
+        _baseline = current;
 
         yield return new Alert(
             Timestamp: DateTime.Now,
             Category:  "Hosts",
-            Title:     "HOSTS FILE CHANGED",
-            Message:   $"{_path}: {prev?[..16] ?? "?"}... -> {current[..16]}...",
+            Title:     current.Kind == FileStateKind.Missing
+                ? "HOSTS FILE DELETED"
+                : previous.Kind == FileStateKind.Missing
+                    ? "HOSTS FILE CREATED"
+                    : "HOSTS FILE CHANGED",
+            Message:   DescribeChange(previous, current),
             Severity:  AlertSeverity.High,
             Path:      _path);
     }
 
-    private static string? HashFileSafe(string path)
+    private string DescribeChange(FileState previous, FileState current)
+        => $"{_path}: {Short(previous)} -> {Short(current)}";
+
+    private static string Short(FileState state)
+        => state.Kind switch
+        {
+            FileStateKind.Missing => "missing",
+            FileStateKind.Unreadable => "unreadable",
+            _ => $"{state.Hash![..16]}...",
+        };
+
+    private static FileState ReadState(string path)
     {
         try
         {
-            if (!File.Exists(path)) return null;
+            if (!File.Exists(path))
+                return new FileState(FileStateKind.Missing, null);
             using var sha = SHA256.Create();
             using var fs  = File.OpenRead(path);
             var hash = sha.ComputeHash(fs);
-            return Convert.ToHexString(hash);
+            return new FileState(FileStateKind.Present, Convert.ToHexString(hash));
         }
         catch
         {
-            return null;
+            return new FileState(FileStateKind.Unreadable, null);
         }
     }
+
+    private enum FileStateKind { Missing, Present, Unreadable }
+    private readonly record struct FileState(FileStateKind Kind, string? Hash);
 }

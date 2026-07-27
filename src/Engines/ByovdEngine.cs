@@ -18,7 +18,7 @@ using WhitehatSecurity.Core;
 
 namespace WhitehatSecurity.Engines;
 
-public sealed class ByovdEngine : IMonitorEngine
+public sealed class ByovdEngine : IMonitorEngine, ICurrentStateScanner
 {
     public string Name => "BYOVD";
 
@@ -64,6 +64,18 @@ public sealed class ByovdEngine : IMonitorEngine
 
     public IEnumerable<Alert> Scan()
     {
+        var current = ScanCurrent().ToList();
+        var present = current
+            .Select(a => Path.GetFileName(a.Path ?? string.Empty))
+            .Where(name => !string.IsNullOrEmpty(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _alerted.IntersectWith(present);
+        return current.Where(a => _alerted.Add(
+            Path.GetFileName(a.Path ?? string.Empty))).ToList();
+    }
+
+    public IEnumerable<Alert> ScanCurrent()
+    {
         var alerts = new List<Alert>();
 
         // CRITICAL: keep the foreach INSIDE the using block. The collection
@@ -83,13 +95,13 @@ public sealed class ByovdEngine : IMonitorEngine
                     var fileName = Path.GetFileName(path);
                     if (string.IsNullOrEmpty(fileName)) continue;
 
-                    if (Catalogue.Contains(fileName) && _alerted.Add(fileName))
+                    if (Catalogue.Contains(fileName))
                     {
                         alerts.Add(new Alert(
                             Timestamp: DateTime.Now,
                             Category:  "BYOVD",
-                            Title:     "VULNERABLE DRIVER LOADED",
-                            Message:   $"{fileName} is a known-vulnerable signed driver ({path})",
+                            Title:     "POTENTIALLY VULNERABLE DRIVER LOADED",
+                            Message:   $"{fileName} matches a known-vulnerable driver filename; verify its hash and version ({path})",
                             Severity:  AlertSeverity.High,
                             Path:      path));
                     }

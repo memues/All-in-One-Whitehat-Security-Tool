@@ -7,8 +7,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Security.Cryptography.X509Certificates;
 using WhitehatSecurity.Core;
+using WhitehatSecurity.Native;
 
 namespace WhitehatSecurity.Engines;
 
@@ -50,6 +50,7 @@ public sealed class ProcessEngine : IMonitorEngine
     public IEnumerable<Alert> Scan()
     {
         var alerts = new List<Alert>();
+        var currentPids = new HashSet<int>();
         Process[] procs;
         try { procs = Process.GetProcesses(); }
         catch { return alerts; }
@@ -59,6 +60,7 @@ public sealed class ProcessEngine : IMonitorEngine
             foreach (var p in procs)
             {
                 if (p.Id == 0 || p.Id == 4) continue;   // Idle / System
+                currentPids.Add(p.Id);
                 if (!_knownPids.Add(p.Id)) continue;
 
                 string? exePath;
@@ -69,14 +71,14 @@ public sealed class ProcessEngine : IMonitorEngine
                 bool inSuspiciousPath = false;
                 foreach (var frag in SuspiciousPathFragments)
                 {
-                    if (exePath.IndexOf(frag, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (exePath.Contains(frag, StringComparison.OrdinalIgnoreCase))
                     {
                         inSuspiciousPath = true;
                         break;
                     }
                 }
 
-                bool signed = IsAuthenticodeSigned(exePath);
+                bool signed = AuthenticodeVerifier.IsTrusted(exePath);
 
                 // Decision matrix:
                 //   unsigned + suspicious path → CRIT (probable malware drop)
@@ -116,6 +118,7 @@ public sealed class ProcessEngine : IMonitorEngine
             // Dispose every Process — including the ones we yielded above —
             // because we materialise the alerts before returning.
             foreach (var p in procs) p.Dispose();
+            _knownPids.IntersectWith(currentPids);
         }
 
         return alerts;
@@ -137,26 +140,4 @@ public sealed class ProcessEngine : IMonitorEngine
             ProcessId:   p.Id,
             Path:        exePath);
 
-    /// <summary>
-    /// Best-effort Authenticode signature check using
-    /// X509Certificate.CreateFromSignedFile. Returns false on any error so
-    /// inaccessible system processes are not reported as unsigned (we just
-    /// skip them by virtue of MainModule throwing first).
-    /// </summary>
-    private static bool IsAuthenticodeSigned(string path)
-    {
-        try
-        {
-            if (!File.Exists(path)) return false;
-            // X509Certificate.CreateFromSignedFile returns the embedded
-            // certificate if the PE has an Authenticode signature, otherwise
-            // throws CryptographicException.
-            using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(path));
-            return cert.Subject.Length > 0;
-        }
-        catch
-        {
-            return false;
-        }
-    }
 }

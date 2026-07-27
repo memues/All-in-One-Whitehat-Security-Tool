@@ -29,13 +29,6 @@ namespace WhitehatSecurity.Core;
 
 public static class Paths
 {
-    /// <summary>Where the program reads/writes its config and logs.</summary>
-    public static string DataDir { get; } = ResolveDataDir();
-
-    public static string ConfigPath  => Path.Combine(DataDir, "notification_config.json");
-    public static string LogsDir     => Path.Combine(DataDir, "Logs");
-    public static string BaselineDir => Path.Combine(DataDir, "Baselines");
-
     /// <summary>
     /// %LOCALAPPDATA%\Whitehat Security — always the user-data location
     /// for an installed copy of the program. Exposed so the uninstaller
@@ -44,6 +37,13 @@ public static class Paths
     public static string UserDataDir { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Whitehat Security");
+
+    /// <summary>Where the program reads/writes its config and logs.</summary>
+    public static string DataDir { get; } = ResolveDataDir();
+
+    public static string ConfigPath  => Path.Combine(DataDir, "notification_config.json");
+    public static string LogsDir     => Path.Combine(DataDir, "Logs");
+    public static string BaselineDir => Path.Combine(DataDir, "Baselines");
 
     private static string ResolveDataDir()
     {

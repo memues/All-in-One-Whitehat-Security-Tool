@@ -26,7 +26,7 @@ public sealed class ConnectionEngine : IMonitorEngine
     /// </summary>
     private const int MaxKnown = 10_000;
 
-    /// <summary>"remoteIP|pid" keys we have already alerted on.</summary>
+    /// <summary>"remoteIP|remotePort|pid" keys already observed.</summary>
     private readonly HashSet<string> _known = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>FIFO insertion order, parallel to _known, for cheap eviction.</summary>
     private readonly Queue<string>   _knownOrder = new();
@@ -90,7 +90,8 @@ public sealed class ConnectionEngine : IMonitorEngine
         int     Pid,
         string? ProcessName);
 
-    private static string Key(ConnectionRecord c) => $"{c.RemoteIp}|{c.Pid}";
+    private static string Key(ConnectionRecord c)
+        => $"{c.RemoteIp}|{c.RemotePort}|{c.Pid}";
 
     private static IEnumerable<ConnectionRecord> EnumerateConnections()
     {
@@ -109,14 +110,16 @@ public sealed class ConnectionEngine : IMonitorEngine
     // materialize the list and free the buffer in one place.
     private static List<ConnectionRecord> QueryTcp4()
     {
+        const uint ErrorInsufficientBuffer = 122;
         var result = new List<ConnectionRecord>();
 
         int size = 0;
-        NativeMethods.GetExtendedTcpTable(
+        var sizeRc = NativeMethods.GetExtendedTcpTable(
             IntPtr.Zero, ref size, false,
             NativeMethods.AF_INET,
             TcpTableClass.OwnerPidConnections, 0);
 
+        if (sizeRc is not (0 or ErrorInsufficientBuffer)) return result;
         if (size <= 0) return result;
 
         IntPtr buffer = Marshal.AllocHGlobal(size);

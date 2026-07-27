@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: MIT
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics.Eventing.Reader;
+using System.Linq;
+using System.Xml.Linq;
+using WhitehatSecurity.Core;
+
+namespace WhitehatSecurity.Engines;
+
+/// <summary>
+/// Monitors high-value Windows Security events. Access to the Security log is
+/// best-effort because standard-user policies can deny it.
+/// </summary>
+public sealed class SecurityEventEngine : IMonitorEngine
+{
+    public string Name => "Security Events";
+
+    private readonly HashSet<long> _seen = new();
+    private readonly Queue<long> _seenOrder = new();
+    private bool _available = true;
+    private const int MaxSeen = 4096;
+
+    public void Initialize()
+    {
+        try { ReadRecent(TimeSpan.FromMinutes(2), markOnly: true); }
+        catch { _available = false; }
+    }
+
+    public IEnumerable<Alert> Scan()
+    {
+        if (!_available) return Array.Empty<Alert>();
+        try
+        {
+            return ReadRecent(TimeSpan.FromSeconds(30), markOnly: false);
+        }
+        catch
+        {
+            _available = false;
+            return Array.Empty<Alert>();
+        }
+    }
+
+    private List<Alert> ReadRecent(TimeSpan window, bool markOnly)
+    {
+        var milliseconds = Math.Max(1000, (long)window.TotalMilliseconds);
+        var queryText =
+            $"*[System[((EventID=4624 or EventID=4625 or EventID=4720) and TimeCreated[timediff(@SystemTime) <= {milliseconds}])]]";
+        var query = new EventLogQuery(
+            "Security", PathType.LogName, queryText)
+        {
+            TolerateQueryErrors = true,
+            ReverseDirection = true,
+        };
+
+        var alerts = new List<Alert>();
+        using var reader = new EventLogReader(query);
+        var readCount = 0;
+        while (readCount++ < 512 && reader.ReadEvent() is { } record)
+        {
+            using (record)
+            {
+                if (record.RecordId is not long recordId
+                    || !Remember(recordId))
+                    continue;
+                if (markOnly) continue;
+
+                var data = ParseEventData(record.ToXml());
+                if (record.Id == 4624
+                    && (!data.TryGetValue("LogonType", out var logonType)
+                        || logonType != "10"))
+                    continue;
+
+                var (title, severity) = record.Id switch
+                {
+                    4624 => ("REMOTE INTERACTIVE LOGON", AlertSeverity.Med),
+                    4625 => ("FAILED WINDOWS LOGON", AlertSeverity.Med),
+                    4720 => ("LOCAL ACCOUNT CREATED", AlertSeverity.High),
+                    _ => ("SECURITY EVENT", AlertSeverity.Info),
+                };
+
+                var extra = new Dictionary<string, string>();
+                CopyIfPresent(data, extra, "TargetUserName", "Account");
+                CopyIfPresent(data, extra, "IpAddress", "RemoteAddress");
+                alerts.Add(new Alert(
+                    record.TimeCreated ?? DateTime.Now,
+                    "Security",
+                    title,
+                    $"Windows Security event {record.Id} was recorded.",
+                    severity,
+                    Extra: extra.Count == 0 ? null : extra));
+            }
+        }
+        return alerts;
+    }
+
+    private bool Remember(long recordId)
+    {
+        if (!_seen.Add(recordId)) return false;
+        _seenOrder.Enqueue(recordId);
+        while (_seenOrder.Count > MaxSeen)
+            _seen.Remove(_seenOrder.Dequeue());
+        return true;
+    }
+
+    private static Dictionary<string, string> ParseEventData(string xml)
+    {
+        try
+        {
+            return XDocument.Parse(xml)
+                .Descendants()
+                .Where(element =>
+                    element.Name.LocalName == "Data"
+                    && element.Attribute("Name") is not null)
+                .GroupBy(element =>
+                    element.Attribute("Name")!.Value)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Last().Value,
+                    StringComparer.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static void CopyIfPresent(
+        Dictionary<string, string> source,
+        Dictionary<string, string> destination,
+        string sourceKey,
+        string destinationKey)
+    {
+        if (source.TryGetValue(sourceKey, out var value)
+            && !string.IsNullOrWhiteSpace(value)
+            && value != "-")
+            destination[destinationKey] = value;
+    }
+}

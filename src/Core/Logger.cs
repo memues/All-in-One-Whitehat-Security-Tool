@@ -71,10 +71,11 @@ public sealed class Logger
 
     private void Write(string level, string stream, string message)
     {
-        var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        var now = DateTime.Now;
+        var stamp = now.ToString("yyyy-MM-dd HH:mm:ss.fff");
         var line  = $"[{stamp}] [{_hostName}] [{level}] {message}";
 
-        var file = Path.Combine(_logsDir, $"{stream}_{DateTime.Now:yyyy-MM-dd}.log");
+        var file = Path.Combine(_logsDir, $"{stream}_{now:yyyy-MM-dd}.log");
 
         lock (_lock)
         {

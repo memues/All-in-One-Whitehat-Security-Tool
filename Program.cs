@@ -31,6 +31,8 @@ namespace WhitehatSecurity;
 internal static class Program
 {
     private const string MutexName = "Global\\WhitehatSecurity-7.4-singleinstance";
+    private const string ShowEventName =
+        "Global\\WhitehatSecurity-7.4-show-dashboard";
 
     /// <summary>
     /// UTC start time of the process. Captured at the very top of Main so
@@ -75,6 +77,11 @@ internal static class Program
         bool install   = HasFlag(args, "--install",   "-Install");
         bool uninstall = HasFlag(args, "--uninstall", "-Uninstall");
         bool quiet     = HasFlag(args, "--quiet",     "-Quiet");
+        var initialTab = GetOption(args, "--tab");
+        if (initialTab is not null
+            && initialTab is not ("Status" or "Alerts" or "AI"
+                or "Settings" or "Logs" or "Console"))
+            initialTab = null;
 
         if (install)   return RunInstall(quiet);
         if (uninstall) return RunUninstall(quiet);
@@ -143,9 +150,11 @@ internal static class Program
 
         // ── Single-instance mutex ───────────────────────────────────────
         using var mutex = new Mutex(initiallyOwned: true, MutexName, out bool createdNew);
+        using var showEvent = new EventWaitHandle(
+            false, EventResetMode.AutoReset, ShowEventName);
         if (!createdNew)
         {
-            // Another instance is already running - exit silently.
+            try { showEvent.Set(); } catch { }
             return 0;
         }
 
@@ -180,6 +189,8 @@ internal static class Program
         host.Register(new RegistryEngine());
         host.Register(new HostsEngine());
         host.Register(new FirmwareEngine());
+        host.Register(new RdpEngine());
+        host.Register(new SecurityEventEngine());
         // v7.3.0 — three new "AI" engines that re-use the existing P/Invoke
         // surface in NativeMethods.cs.
         host.Register(new HiddenProcessEngine());
@@ -189,8 +200,10 @@ internal static class Program
         // ── Tray context owns the message pump ──────────────────────────
         try
         {
-            var ctx = new TrayApplicationContext(config, logger, host, consoleSink, configPath);
-            if (!silent) ctx.OpenDashboard();
+            using var ctx = new TrayApplicationContext(
+                config, logger, host, consoleSink, configPath, showEvent);
+            if (!silent || initialTab is not null)
+                ctx.OpenDashboard(initialTab);
             Application.Run(ctx);
         }
         catch (Exception ex)
@@ -273,7 +286,8 @@ internal static class Program
             };
             using var p = Process.Start(psi);
             if (p is null) return -1;
-            p.WaitForExit(120_000);
+            if (!p.WaitForExit(120_000))
+                return -3;
             return p.ExitCode;
         }
         catch (Exception)
@@ -290,5 +304,13 @@ internal static class Program
                 if (a.Equals(f, StringComparison.OrdinalIgnoreCase))
                     return true;
         return false;
+    }
+
+    private static string? GetOption(string[] args, string name)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+            if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+                return args[i + 1];
+        return null;
     }
 }

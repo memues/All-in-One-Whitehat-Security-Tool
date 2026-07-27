@@ -2,17 +2,17 @@
 
 A real-time Windows security monitoring tool written in C# / .NET 8 / WinForms. Compiles to a single self-contained `.exe`.
 
-This repository previously also contained a PowerShell implementation (`SecurityMonitor.ps1`) plus an experimental C kernel driver. Both have been removed — only the C# version remains. The C# version was built specifically to sidestep the AMSI heuristic detections (`Heur.BZC.ZFV.Boxter`, `HackTool:PowerShell/Mimikatz`, etc.) that the PowerShell version reliably triggered because of its plaintext attack-tool name lists, hidden-window plus execution-policy-bypass combination, and download-cradle install pattern.
+This repository previously also contained a PowerShell implementation (`SecurityMonitor.ps1`) plus an experimental C kernel driver. Both have been removed — only the C# version remains. The C# version avoids PowerShell-specific AMSI heuristics that the script implementation triggered because of its plaintext attack-tool name lists, hidden-window plus execution-policy-bypass combination, and download-cradle install pattern.
 
-A compiled `.exe` avoids those problems entirely:
+A compiled `.exe` reduces those script-specific triggers; endpoint security products can and should still scan the resulting binary:
 
 | Old PowerShell problem | How the compiled `.exe` solves it |
 |------------------------|-----------------------------------|
-| AMSI scans script content for malware substrings | No script — code is JIT-compiled from a binary assembly |
-| Each detection pattern sits in plain text in the source | Patterns live as compiled constants, not visible to AMSI |
-| `-ExecutionPolicy Bypass -WindowStyle Hidden` flagged | Native `.exe`, no PowerShell flags involved |
+| AMSI scans PowerShell source for malware substrings | No PowerShell monitor script; endpoint protection still scans the binary |
+| Each pattern becomes part of the PowerShell token stream | Detection logic is compiled into the application assembly |
+| Long-running `-ExecutionPolicy Bypass -WindowStyle Hidden` monitor flagged | Native monitoring engines; short elevated PowerShell helpers run only after an explicit admin setting change |
 | Persistence + download + hidden window in one script = `Heur.Boxter` | Single binary, no install cradle |
-| Slow start (interpret + JIT 7 000 lines on every run) | Compiled binary starts in ~150 ms |
+| Script parsing on every run | Compiled application startup |
 | End user has to allow PowerShell execution policy | End user just runs `WhitehatSecurity.exe` |
 
 ## Build
@@ -31,6 +31,12 @@ dotnet publish -c Release -r win-x64 --self-contained
 
 The published binary lives at `bin\Release\net8.0-windows\win-x64\publish\WhitehatSecurity.exe`.
 
+Run the Windows smoke-test harness:
+
+```pwsh
+dotnet run --project tests\WhitehatSecurity.SmokeTests -c Release
+```
+
 ## Install / Uninstall
 
 The `.exe` is its own installer. Just download `WhitehatSecurity.exe` from the latest release and double-click it:
@@ -41,7 +47,7 @@ The `.exe` is its own installer. Just download `WhitehatSecurity.exe` from the l
   - creates a **Start Menu** shortcut
   - creates a shortcut on **the user's Desktop** (handles OneDrive Known Folder Move) and on the **Public Desktop**
   - adds an **HKLM\…\Run** entry so the program **auto-starts at every logon** in tray-only mode (`--silent`)
-- **Uninstall**: open *Settings → Apps → Apps & Features*, find **Whitehat Security**, click *Uninstall*. Or run `WhitehatSecurity.exe --uninstall` from a terminal. The uninstaller removes the install dir, both desktop shortcuts, the Start Menu shortcut, the Apps & Features registry entry, and the auto-start Run entry.
+- **Uninstall**: open *Settings → Apps → Apps & Features*, find **Whitehat Security**, click *Uninstall*. Or run `WhitehatSecurity.exe --uninstall` from a terminal. The uninstaller removes the install dir, shortcuts, registry entries, app-managed firewall/hosts rules, and restores DNS settings saved before the app changed them.
 
 CLI flags:
 
@@ -52,19 +58,21 @@ CLI flags:
 | `--install` | Copy self to Program Files, register in Add/Remove Programs (must be run elevated; UAC is requested automatically when triggered from the first-run dialog) |
 | `--uninstall` | Remove install dir, shortcuts, registry entry (run elevated) |
 | `--quiet` | Suppress success/error message boxes during install/uninstall |
+| `--tab <name>` | Open a dashboard tab (`Status`, `Alerts`, `AI`, `Settings`, `Logs`, or `Console`) |
 
 ## Layout
 
 ```
 .
 ├── WhitehatSecurity.csproj
-├── app.manifest                  # asInvoker / DPI / longPath manifest
+├── app.manifest                  # asInvoker / longPath manifest
 ├── Program.cs                    # entry point + single-instance mutex
 └── src/
     ├── Core/
     │   ├── NotifyConfig.cs       # JSON config (notification_config.json)
     │   ├── Logger.cs             # daily rolling log files
     │   ├── Alert.cs              # alert record + AlertGate
+    │   ├── CsvSafety.cs          # formula-safe CSV escaping
     │   └── MonitorHost.cs        # background loop runner
     ├── Engines/
     │   ├── IMonitorEngine.cs     # engine contract
@@ -75,8 +83,11 @@ CLI flags:
     │   ├── ServiceEngine.cs      # new Windows services
     │   ├── RegistryEngine.cs     # Run/RunOnce + tampering keys
     │   ├── HostsEngine.cs        # hosts-file hash watch
-    │   └── FirmwareEngine.cs     # .sys / .efi / .rom hashing
+    │   ├── FirmwareEngine.cs     # .sys / .efi / .rom hashing
+    │   ├── RdpEngine.cs          # Remote Desktop state changes
+    │   └── SecurityEventEngine.cs# Windows Security log events
     ├── Native/
+    │   ├── AuthenticodeVerifier.cs # embedded + catalog signatures
     │   ├── NativeMethods.cs      # P/Invoke (kernel32, ntdll, iphlpapi)
     │   ├── NativeStructs.cs      # MIB_TCPROW_OWNER_PID, etc.
     │   └── NotifyIconPromote.cs  # Win11 IsPromoted registry helper
@@ -101,6 +112,7 @@ CLI flags:
 | Outbound TCP connection tracker                      | ✓ |
 | New listening port detection                         | ✓ |
 | Unsigned process detection                           | ✓ |
+| Embedded and Windows catalog signature validation    | ✓ |
 | Driver baseline + change detection                   | ✓ |
 | Service baseline + change detection                  | ✓ |
 | Run / RunOnce registry watch                         | ✓ |
@@ -110,9 +122,11 @@ CLI flags:
 | Hidden process detection via `NtQuerySystemInformation` | ✓ |
 | RWX private memory scanner                           | ✓ |
 | BYOVD vulnerable driver detection                    | ✓ |
+| RDP enable/disable monitoring                        | ✓ |
+| Security log monitoring (remote/failed logons, new accounts; permission-dependent) | ✓ |
 | **`Connection` notification opt-in by default**      | ✓ |
 | Per-day rolling log files                            | ✓ |
-| Single-instance mutex                                | ✓ |
+| Single-instance activation (shortcuts reopen the running dashboard) | ✓ |
 | Status page **live** posture row (Defender / Firewall / UAC / RDP / SecureBoot / TPM / HVCI / BitLocker) | ✓ |
 | Alerts page search + severity & category filters     | ✓ |
 | Alerts page export to CSV / JSON                     | ✓ |
@@ -123,7 +137,7 @@ CLI flags:
 | Hosts-based blocklists (Trackers / Malware / Telemetry) | ✓ |
 | DNS provider switching with revert-on-failure        | ✓ |
 | DNS-over-HTTPS (Windows 11)                          | ✓ |
-| Block DNS bypass (port 53 outbound)                  | ✓ |
+| DNS-bypass lock                                      | Disabled — the legacy blanket port-53 rule also blocked the Windows DNS client |
 | ETW provider listener                                | TODO |
 | WinRT toast (vs legacy balloons)                     | TODO |
 | Sidebar collapse animation                           | TODO |

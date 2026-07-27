@@ -23,7 +23,7 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.4.0";
+    public const string ProductVersion = "7.4.1";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
 
@@ -195,7 +195,7 @@ public static class Installer
         key.SetValue("EstimatedSize",   (int)sizeKb, RegistryValueKind.DWord);
         key.SetValue("NoModify",        1, RegistryValueKind.DWord);
         key.SetValue("NoRepair",        1, RegistryValueKind.DWord);
-        key.SetValue("URLInfoAbout",    "https://github.com/xyzwebmaster/All-in-One-Whitehat-Security-Tool");
+        key.SetValue("URLInfoAbout",    "https://github.com/memues/All-in-One-Whitehat-Security-Tool");
     }
 
     private static void CreateShortcut(string lnkPath, string targetExe)
@@ -277,6 +277,11 @@ public static class Installer
         {
             logger?.Warn($"Process enumeration failed: {ex.Message}");
         }
+
+        var cleanupCode = ElevationHelper.CleanupManagedChanges(logger);
+        if (cleanupCode != 0)
+            logger?.Warn(
+                $"Managed firewall/hosts/DNS cleanup exited {cleanupCode}");
 
         // Best-effort: delete the registry entry first so the entry vanishes
         // from Apps & Features even if file removal fails for any reason.

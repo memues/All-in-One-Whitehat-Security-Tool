@@ -35,13 +35,15 @@ public sealed class FirmwareEngine : IMonitorEngine
 
     public void Initialize()
     {
-        foreach (var (path, hash) in EnumerateAndHash())
+        if (!TryEnumerateAndHash(out var current)) return;
+        foreach (var (path, hash) in current)
             _baseline[path] = hash;
     }
 
     public IEnumerable<Alert> Scan()
     {
-        var current = EnumerateAndHash().ToDictionary(t => t.Path, t => t.Hash, StringComparer.OrdinalIgnoreCase);
+        if (!TryEnumerateAndHash(out var current))
+            yield break;
 
         // Hash mismatch / new file
         foreach (var (path, hash) in current)
@@ -70,7 +72,9 @@ public sealed class FirmwareEngine : IMonitorEngine
         }
 
         // Deleted files
-        var removed = _baseline.Keys.Where(k => !current.ContainsKey(k)).ToList();
+        var removed = _baseline.Keys
+            .Where(k => !current.ContainsKey(k) && !File.Exists(k))
+            .ToList();
         foreach (var k in removed)
         {
             yield return new Alert(
@@ -84,20 +88,24 @@ public sealed class FirmwareEngine : IMonitorEngine
         }
     }
 
-    private static IEnumerable<(string Path, string Hash)> EnumerateAndHash()
+    private static bool TryEnumerateAndHash(
+        out Dictionary<string, string> result)
     {
+        result = new Dictionary<string, string>(
+            StringComparer.OrdinalIgnoreCase);
         foreach (var root in WatchedRoots)
         {
-            if (!Directory.Exists(root)) continue;
+            if (!Directory.Exists(root)) return false;
 
-            IEnumerable<string> files;
+            string[] files;
             try
             {
-                files = Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly);
+                files = Directory.GetFiles(
+                    root, "*", SearchOption.TopDirectoryOnly);
             }
             catch
             {
-                continue;
+                return false;
             }
 
             foreach (var file in files)
@@ -107,9 +115,10 @@ public sealed class FirmwareEngine : IMonitorEngine
 
                 string? h = HashSafe(file);
                 if (h is not null)
-                    yield return (file, h);
+                    result[file] = h;
             }
         }
+        return true;
     }
 
     private static string? HashSafe(string path)

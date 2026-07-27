@@ -14,6 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 using WhitehatSecurity.Core;
 
@@ -60,7 +61,7 @@ public sealed partial class DashboardForm
         };
         var version = new Label
         {
-            Text      = "v7.4 Dashboard",
+            Text      = "v7.4.1 Dashboard",
             ForeColor = Theme.TextDim,
             Font      = new Font("Segoe UI", 8),
             AutoSize  = false,
@@ -130,6 +131,15 @@ public sealed partial class DashboardForm
             Padding    = new Padding(16, 0, 0, 0),
             Cursor     = Cursors.Hand,
             Tag        = key,
+            TabIndex   = key switch
+            {
+                "Status" => 0,
+                "Alerts" => 1,
+                "AI" => 2,
+                "Settings" => 3,
+                "Logs" => 4,
+                _ => 5,
+            },
         };
         btn.FlatAppearance.BorderSize        = 0;
         btn.FlatAppearance.MouseOverBackColor = Theme.BtnHover;
@@ -140,12 +150,26 @@ public sealed partial class DashboardForm
 
     private void ShowPage(string key)
     {
+        if (key == "Logs" && _content is not null
+            && _navPages.TryGetValue("Logs", out var previous))
+        {
+            _content.Controls.Remove(previous);
+            previous.Dispose();
+            var refreshed = BuildLogsPage();
+            refreshed.Dock = DockStyle.Fill;
+            _navPages["Logs"] = refreshed;
+            _content.Controls.Add(refreshed);
+        }
+
         foreach (var (k, page) in _navPages)
             page.Visible = (k == key);
 
         // Highlight the active nav button
         foreach (var (k, btn) in _navButtons)
             btn.BackColor = (k == key) ? Theme.BtnHover : Theme.Sidebar;
+        if (_navButtons.TryGetValue(key, out var activeButton)
+            && activeButton.CanSelect)
+            activeButton.Select();
     }
 
     /// <summary>
@@ -205,7 +229,9 @@ public sealed partial class DashboardForm
                 $"Architecture: {(Environment.Is64BitProcess ? "x64" : "x86")}",
             Font      = Theme.Mono(9, FontStyle.Bold),
             ForeColor = Theme.TextMain,
-            AutoSize  = true,
+            AutoSize  = false,
+            AutoEllipsis = true,
+            Size      = new Size(816, 22),
             Location  = new Point(16, 24),
         };
         info.Controls.Add(infoLine);
@@ -242,7 +268,8 @@ public sealed partial class DashboardForm
             int row = i / 4;
             var lbl = new Label
             {
-                Text      = "● " + postureKeys[i],
+                Text      = "● " + postureKeys[i] + ": Unknown",
+                AccessibleName = postureKeys[i] + ": Unknown",
                 ForeColor = Theme.PostureNa,    // starts gray; refresh sets the real color
                 Font      = new Font("Segoe UI", 9, FontStyle.Bold),
                 AutoSize  = true,
@@ -279,6 +306,33 @@ public sealed partial class DashboardForm
         _recentList.Columns.Add("Title",    540);
         page.Controls.Add(_recentList);
 
+        void LayoutStatusPage()
+        {
+            var width = Math.Max(620, page.ClientSize.Width - 20);
+            const int gap = 12;
+            var cardWidth = Math.Max(130, (width - gap * 3) / 4);
+            var cards = new[] { alertCard, connCard, procCard, upCard };
+            for (var i = 0; i < cards.Length; i++)
+            {
+                cards[i].Left = 8 + i * (cardWidth + gap);
+                cards[i].Width = cardWidth;
+            }
+            info.Width = width;
+            infoLine.Width = Math.Max(120, info.ClientSize.Width - 32);
+            postureCard.Width = width;
+            var labels = postureCard.Controls.OfType<Label>().ToArray();
+            var columnWidth = Math.Max(
+                130, (postureCard.ClientSize.Width - 40) / 4);
+            for (var i = 0; i < labels.Length; i++)
+                labels[i].Left = 20 + (i % 4) * columnWidth;
+            _recentList.Width = width;
+            _recentList.Columns[3].Width = Math.Max(
+                160, _recentList.ClientSize.Width - 285);
+            page.AutoScrollMinSize = new Size(0, 660);
+        }
+        page.Resize += (_, _) => LayoutStatusPage();
+        page.HandleCreated += (_, _) => LayoutStatusPage();
+
         return page;
     }
 
@@ -295,7 +349,6 @@ public sealed partial class DashboardForm
             Size      = new Size(200, 90),
             BackColor = Theme.Card,
             Location  = location,
-            Cursor    = Cursors.Hand,
         };
         var bar = new Panel
         {
@@ -324,13 +377,6 @@ public sealed partial class DashboardForm
         card.Controls.Add(header);
         card.Controls.Add(value);
 
-        // Hover effect
-        void Hover(object? s, EventArgs e) => card.BackColor = Theme.CardHover;
-        void Leave(object? s, EventArgs e) => card.BackColor = Theme.Card;
-        card.MouseEnter   += Hover; card.MouseLeave   += Leave;
-        header.MouseEnter += Hover; header.MouseLeave += Leave;
-        value.MouseEnter  += Hover; value.MouseLeave  += Leave;
-
         return (card, value);
     }
 
@@ -353,7 +399,7 @@ public sealed partial class DashboardForm
 
         // ── Filter row (search + severity + category + export buttons) ──
         _alertSearch.Location  = new Point(8, 50);
-        _alertSearch.Size      = new Size(180, 24);
+        _alertSearch.Size      = new Size(174, 24);
         _alertSearch.Font      = Theme.Body(9);
         _alertSearch.BackColor = Theme.Card;
         _alertSearch.ForeColor = Theme.TextMain;
@@ -362,8 +408,8 @@ public sealed partial class DashboardForm
         _alertSearch.TextChanged += OnAlertSearchChanged;
         page.Controls.Add(_alertSearch);
 
-        _alertSeverityFilter.Location      = new Point(196, 50);
-        _alertSeverityFilter.Size          = new Size(110, 24);
+        _alertSeverityFilter.Location      = new Point(190, 50);
+        _alertSeverityFilter.Size          = new Size(90, 24);
         _alertSeverityFilter.DropDownStyle = ComboBoxStyle.DropDownList;
         _alertSeverityFilter.BackColor     = Theme.Card;
         _alertSeverityFilter.ForeColor     = Theme.TextMain;
@@ -374,8 +420,8 @@ public sealed partial class DashboardForm
         _alertSeverityFilter.SelectedIndexChanged += OnAlertFilterChanged;
         page.Controls.Add(_alertSeverityFilter);
 
-        _alertCategoryFilter.Location      = new Point(314, 50);
-        _alertCategoryFilter.Size          = new Size(150, 24);
+        _alertCategoryFilter.Location      = new Point(288, 50);
+        _alertCategoryFilter.Size          = new Size(124, 24);
         _alertCategoryFilter.DropDownStyle = ComboBoxStyle.DropDownList;
         _alertCategoryFilter.BackColor     = Theme.Card;
         _alertCategoryFilter.ForeColor     = Theme.TextMain;
@@ -392,11 +438,11 @@ public sealed partial class DashboardForm
         page.Controls.Add(_alertCategoryFilter);
 
         // Export buttons sit on the right of the filter row
-        StyleSmallButton(_btnExportCsv,  "Export CSV",  new Point(472, 49));
+        StyleSmallButton(_btnExportCsv,  "Export CSV",  new Point(438, 49));
         _btnExportCsv.Click  += OnExportCsvClick;
-        StyleSmallButton(_btnExportJson, "Export JSON", new Point(572, 49));
+        StyleSmallButton(_btnExportJson, "Export JSON", new Point(530, 49));
         _btnExportJson.Click += OnExportJsonClick;
-        StyleSmallButton(_btnClearAlerts, "Clear All",  new Point(672, 49));
+        StyleSmallButton(_btnClearAlerts, "Clear All",  new Point(622, 49));
         _btnClearAlerts.Click += OnClearAlertsClick;
         page.Controls.Add(_btnExportCsv);
         page.Controls.Add(_btnExportJson);
@@ -432,8 +478,8 @@ public sealed partial class DashboardForm
         _alertsList.Font          = Theme.Mono(9);
         _alertsList.HeaderStyle   = ColumnHeaderStyle.Clickable;
         _alertsList.Columns.Add("Time",     85);
-        _alertsList.Columns.Add("Severity", 65);
-        _alertsList.Columns.Add("Category", 95);
+        _alertsList.Columns.Add("Severity", 80);
+        _alertsList.Columns.Add("Category", 90);
         _alertsList.Columns.Add("Title",    140);
         _alertsList.Columns.Add("Message",  140);
         _alertsList.SelectedIndexChanged += OnAlertSelected;
@@ -461,8 +507,8 @@ public sealed partial class DashboardForm
         // WordWrap off + Both scrollbars so a long path or message is
         // horizontally scrollable instead of being silently cut off at
         // the right edge of the panel.
-        _alertDetailBody.WordWrap   = false;
-        _alertDetailBody.ScrollBars = ScrollBars.Both;
+        _alertDetailBody.WordWrap   = true;
+        _alertDetailBody.ScrollBars = ScrollBars.Vertical;
         _alertDetailBody.BackColor  = Theme.Card;
         _alertDetailBody.ForeColor  = Theme.TextMain;
         _alertDetailBody.Font       = Theme.Mono(9);
@@ -472,12 +518,11 @@ public sealed partial class DashboardForm
         // Action buttons
         StyleActionButton(_btnIpLookup,    "IP Lookup",     new Point(16, 420), 110);
         _btnIpLookup.Click    += OnIpLookupClick;
-        StyleActionButton(_btnOpenLog,     "Open Log",      new Point(132, 420), 110);
+        StyleActionButton(_btnOpenLog,     "Show File",     new Point(132, 420), 110);
         _btnOpenLog.Click     += OnOpenLogClick;
         StyleActionButton(_btnRegedit,     "Open Regedit",  new Point(248, 420), 110);
         _btnRegedit.Click     += OnRegeditClick;
-        StyleActionButton(_btnRestoreReg,  "Restore Reg",   new Point(364, 420), 110);
-        _btnRestoreReg.Click  += OnRestoreRegistryClick;
+        _btnRestoreReg.Visible = false;
         StyleActionButton(_btnBlockIp,     "Block IP (FW)", new Point(16, 460), 226);
         _btnBlockIp.Click     += OnBlockIpClick;
         StyleActionButton(_btnKillProcess, "Kill PID",      new Point(248, 460), 226);
@@ -485,7 +530,6 @@ public sealed partial class DashboardForm
         _alertDetail.Controls.Add(_btnIpLookup);
         _alertDetail.Controls.Add(_btnOpenLog);
         _alertDetail.Controls.Add(_btnRegedit);
-        _alertDetail.Controls.Add(_btnRestoreReg);
         _alertDetail.Controls.Add(_btnBlockIp);
         _alertDetail.Controls.Add(_btnKillProcess);
 
@@ -493,6 +537,53 @@ public sealed partial class DashboardForm
 
         // Hide all action buttons until an alert is selected
         ClearAlertDetail();
+
+        void LayoutAlertsPage()
+        {
+            var width = Math.Max(680, page.ClientSize.Width);
+            var listWidth = Math.Max(
+                360, (int)((width - 28) * 0.58));
+            _alertsList.Width = listWidth;
+            _alertDetail.Left = _alertsList.Right + 12;
+            _alertDetail.Width = Math.Max(
+                260, width - _alertDetail.Left - 8);
+            _alertDetailTitle.Width = Math.Max(
+                120, _alertDetail.ClientSize.Width - 32);
+            _alertDetailBody.Width = Math.Max(
+                120, _alertDetail.ClientSize.Width - 32);
+            _alertDetailBody.Height = Math.Max(
+                160, _alertDetail.ClientSize.Height - 176);
+
+            var half = Math.Max(
+                100, (_alertDetail.ClientSize.Width - 48) / 2);
+            var right = 24 + half;
+            var row1 = _alertDetail.ClientSize.Height - 112;
+            var row2 = _alertDetail.ClientSize.Height - 74;
+            var row3 = _alertDetail.ClientSize.Height - 36;
+            _btnIpLookup.SetBounds(16, row1, half, 32);
+            _btnOpenLog.SetBounds(right, row1, half, 32);
+            _btnRegedit.SetBounds(16, row2, half, 32);
+            _btnBlockIp.SetBounds(right, row2, half, 32);
+            _btnKillProcess.SetBounds(
+                16, row3, _alertDetail.ClientSize.Width - 32, 32);
+
+            _alertsList.Columns[3].Width = Math.Max(
+                110, (_alertsList.ClientSize.Width - 325) / 2);
+            _alertsList.Columns[4].Width = Math.Max(
+                110, _alertsList.ClientSize.Width
+                    - _alertsList.Columns.Cast<ColumnHeader>()
+                        .Take(4).Sum(c => c.Width) - 6);
+
+            const int buttonWidth = 86;
+            _btnClearAlerts.SetBounds(
+                width - 8 - buttonWidth, 49, buttonWidth, 26);
+            _btnExportJson.SetBounds(
+                _btnClearAlerts.Left - 92, 49, buttonWidth, 26);
+            _btnExportCsv.SetBounds(
+                _btnExportJson.Left - 92, 49, buttonWidth, 26);
+        }
+        page.Resize += (_, _) => LayoutAlertsPage();
+        page.HandleCreated += (_, _) => LayoutAlertsPage();
 
         return page;
     }
@@ -515,7 +606,7 @@ public sealed partial class DashboardForm
     {
         btn.Text       = text;
         btn.Location   = loc;
-        btn.Size       = new Size(96, 26);
+        btn.Size       = new Size(86, 26);
         btn.FlatStyle  = FlatStyle.Flat;
         btn.BackColor  = Theme.BtnHover;
         btn.ForeColor  = Theme.TextMain;
@@ -588,6 +679,11 @@ public sealed partial class DashboardForm
         _aiResultsList.Columns.Add("Title",    250);
         _aiResultsList.Columns.Add("Message",  560);
         page.Controls.Add(_aiResultsList);
+        page.Resize += (_, _) =>
+        {
+            _aiResultsList.Columns[3].Width = Math.Max(
+                180, _aiResultsList.ClientSize.Width - 470);
+        };
 
         return page;
     }
@@ -622,14 +718,15 @@ public sealed partial class DashboardForm
             Text      = "Toggle which findings raise notifications. Changes save automatically. Items marked [admin] trigger UAC.",
             Font      = Theme.Body(9),
             ForeColor = Theme.TextDim,
-            AutoSize  = true,
+            AutoSize  = false,
+            Size      = new Size(800, 36),
             Location  = new Point(8, y),
         };
         page.Controls.Add(subtitle);
         y += 28;
 
         // -------- Reset / Export / Import button row --------
-        var btnReset  = new Button { Text = "Reset to Defaults", Location = new Point(20,  y), Size = new Size(140, 28) };
+        var btnReset  = new Button { Text = "Reset App Defaults", Location = new Point(20,  y), Size = new Size(140, 28) };
         var btnExport = new Button { Text = "Export Config",     Location = new Point(166, y), Size = new Size(120, 28) };
         var btnImport = new Button { Text = "Import Config",     Location = new Point(292, y), Size = new Size(120, 28) };
         foreach (var b in new[] { btnReset, btnExport, btnImport })
@@ -679,7 +776,7 @@ public sealed partial class DashboardForm
 
         // -------- Firewall Block Rules --------
         y = AddSectionHeader(page, "Firewall Block Rules  [admin]", y + 8);
-        y = AddSettingCheckbox(page, "FW_BlockInbound",  "Block All Inbound",   "Block all incoming connections except explicitly allowed", _config.FW_BlockInbound,  y);
+        y = AddSettingCheckbox(page, "FW_BlockInbound",  "Block All Inbound",   "Create a managed rule that blocks all incoming traffic until removed", _config.FW_BlockInbound,  y);
         y = AddSettingCheckbox(page, "FW_BlockOutbound", "Block All Outbound",  "Block all outgoing connections (strict — may break apps)", _config.FW_BlockOutbound, y);
         y = AddSettingCheckbox(page, "FW_BlockPing",     "Block ICMP Ping",     "Block incoming ping requests",                              _config.FW_BlockPing,     y);
         y = AddSettingCheckbox(page, "FW_BlockLAN",      "Block LAN Traffic",   "Block all local network traffic",                           _config.FW_BlockLAN,      y);
@@ -690,7 +787,9 @@ public sealed partial class DashboardForm
         y = AddSettingCheckbox(page, "PF_BlockTrackers",  "Block Trackers",     "Block known tracking domains via hosts file",          _config.PF_BlockTrackers,  y);
         y = AddSettingCheckbox(page, "PF_BlockMalware",   "Block Malware",      "Block known malware domains via hosts file",            _config.PF_BlockMalware,   y);
         y = AddSettingCheckbox(page, "PF_BlockTelemetry", "Block Telemetry",    "Block Windows and third-party telemetry domains",       _config.PF_BlockTelemetry, y);
-        y = AddSettingCheckbox(page, "PF_BlockDNSBypass", "Prevent DNS Bypass", "Lock port 53 - block DNS traffic except configured DNS", _config.PF_BlockDNSBypass, y);
+        y = AddSettingCheckbox(page, "PF_BlockDNSBypass", "Prevent DNS Bypass (unavailable)", "Disabled: a blanket port 53 rule also blocks the Windows DNS client", false, y);
+        _config.PF_BlockDNSBypass = false;
+        _settingsCheckboxes["PF_BlockDNSBypass"].Enabled = false;
 
         // -------- DNS section --------
         y = AddSectionHeader(page, "DNS & Secure DNS  [admin]", y + 8);
@@ -720,12 +819,26 @@ public sealed partial class DashboardForm
         dnsCombo.SelectedItem = _config.DNS_Provider;
         dnsCombo.SelectedIndexChanged += OnDnsProviderChanged;
         page.Controls.Add(dnsCombo);
+        _dnsProviderCombo = dnsCombo;
         y += 36;
 
         y = AddSettingCheckbox(page, "DNS_DoH", "Enable DNS over HTTPS", "Encrypt DNS queries (requires compatible provider)", _config.DNS_DoH, y);
+        ApplyDnsControlState();
 
         // Final padding so the last setting isn't flush with the bottom edge
         page.Controls.Add(new Panel { Location = new Point(0, y + 24), Size = new Size(1, 1) });
+        page.Resize += (_, _) =>
+        {
+            if (page.ClientSize.Width < 360) return;
+            foreach (Control control in page.Controls)
+            {
+                if (control is Panel panel && panel.Width > 700)
+                    panel.Width = Math.Max(
+                        280, page.ClientSize.Width - panel.Left - 16);
+            }
+            subtitle.Width = Math.Max(280, page.ClientSize.Width - 20);
+            page.AutoScrollMinSize = new Size(0, y + 36);
+        };
 
         return page;
     }
@@ -746,6 +859,7 @@ public sealed partial class DashboardForm
             Font      = Theme.SectionTitle(),
             ForeColor = Theme.AccentBlue,
             AutoSize  = true,
+            UseMnemonic = false,
             Location  = new Point(8, y + 10),
         };
         page.Controls.Add(lbl);
@@ -760,6 +874,7 @@ public sealed partial class DashboardForm
             Size      = new Size(820, 46),
             BackColor = Theme.Card,
         };
+        card.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
         var cb = new CheckBox
         {
@@ -785,6 +900,7 @@ public sealed partial class DashboardForm
             ForeColor = Theme.TextDim,
             BackColor = Theme.Card,
         };
+        d.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         card.Controls.Add(d);
 
         page.Controls.Add(card);
@@ -797,6 +913,16 @@ public sealed partial class DashboardForm
     private Panel BuildLogsPage()
     {
         var page = new Panel { BackColor = Theme.Bg, AutoScroll = true };
+        // Keep all log-page content inside one docked body. Directly placing
+        // wide cards on an AutoScroll panel makes WinForms cache their
+        // pre-layout width and can leave a phantom horizontal scrollbar.
+        var body = new Panel
+        {
+            BackColor = Theme.Bg,
+            Dock = DockStyle.Top,
+            Size = new Size(864, 110),
+        };
+        page.Controls.Add(body);
 
         var title = new Label
         {
@@ -806,17 +932,19 @@ public sealed partial class DashboardForm
             AutoSize  = true,
             Location  = new Point(8, 8),
         };
-        page.Controls.Add(title);
+        body.Controls.Add(title);
 
         var subtitle = new Label
         {
             Text      = "Every log file under the data directory. Click any card to open in Notepad. Files older than 30 days are pruned automatically at startup.",
             Font      = Theme.Body(9),
             ForeColor = Theme.TextDim,
-            AutoSize  = true,
+            AutoSize  = false,
+            Size      = new Size(800, 36),
             Location  = new Point(8, 44),
+            Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
-        page.Controls.Add(subtitle);
+        body.Controls.Add(subtitle);
 
         var logsDir = Paths.LogsDir;
         var files = new List<FileInfo>();
@@ -842,7 +970,7 @@ public sealed partial class DashboardForm
                 AutoSize  = true,
                 Location  = new Point(8, 80),
             };
-            page.Controls.Add(empty);
+            body.Controls.Add(empty);
             return page;
         }
 
@@ -856,6 +984,7 @@ public sealed partial class DashboardForm
                 BackColor = Theme.Card,
                 Cursor    = Cursors.Hand,
                 Tag       = fi.FullName,
+                Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             };
             card.Click += OnOpenFileClick;
 
@@ -883,9 +1012,10 @@ public sealed partial class DashboardForm
             d.Tag    = card.Tag;
             card.Controls.Add(d);
 
-            page.Controls.Add(card);
+            body.Controls.Add(card);
             y += 64;
         }
+        body.Height = y + 12;
 
         return page;
     }
@@ -904,6 +1034,27 @@ public sealed partial class DashboardForm
     private Panel BuildConsolePage()
     {
         var page = new Panel { BackColor = Theme.Bg };
+        var layout = new TableLayoutPanel
+        {
+            BackColor = Theme.Bg,
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(layout);
+
+        var header = new Panel
+        {
+            BackColor = Theme.Bg,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+        };
+        layout.Controls.Add(header, 0, 0);
 
         var title = new Label
         {
@@ -913,7 +1064,7 @@ public sealed partial class DashboardForm
             AutoSize  = true,
             Location  = new Point(8, 8),
         };
-        page.Controls.Add(title);
+        header.Controls.Add(title);
 
         var clearBtn = new Button
         {
@@ -928,7 +1079,7 @@ public sealed partial class DashboardForm
         };
         clearBtn.FlatAppearance.BorderSize = 0;
         clearBtn.Click += OnClearConsoleClick;
-        page.Controls.Add(clearBtn);
+        header.Controls.Add(clearBtn);
 
         var saveBtn = new Button
         {
@@ -943,7 +1094,7 @@ public sealed partial class DashboardForm
         };
         saveBtn.FlatAppearance.BorderSize = 0;
         saveBtn.Click += OnSaveConsoleClick;
-        page.Controls.Add(saveBtn);
+        header.Controls.Add(saveBtn);
 
         _consoleAutoScroll.Text      = "Auto-scroll";
         _consoleAutoScroll.Location  = new Point(238, 56);
@@ -952,26 +1103,36 @@ public sealed partial class DashboardForm
         _consoleAutoScroll.ForeColor = Theme.TextMain;
         _consoleAutoScroll.BackColor = Theme.Bg;
         _consoleAutoScroll.Font      = new Font("Segoe UI", 9);
-        page.Controls.Add(_consoleAutoScroll);
+        header.Controls.Add(_consoleAutoScroll);
 
         _consoleDroppedLabel.Location  = new Point(360, 56);
         _consoleDroppedLabel.AutoSize  = true;
         _consoleDroppedLabel.Font      = new Font("Segoe UI", 9);
         _consoleDroppedLabel.ForeColor = Theme.TextDim;
         _consoleDroppedLabel.Text      = "";
-        page.Controls.Add(_consoleDroppedLabel);
+        header.Controls.Add(_consoleDroppedLabel);
 
-        _consoleBox.Location    = new Point(8, 90);
-        _consoleBox.Size        = new Size(1000, 540);
-        _consoleBox.Anchor      = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        var consoleHost = new Panel
+        {
+            BackColor = Theme.Bg,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Padding = new Padding(8, 0, 8, 0),
+        };
+        layout.Controls.Add(consoleHost, 0, 1);
+
+        _consoleBox.Dock        = DockStyle.Fill;
         _consoleBox.Font        = Theme.Mono(9);
         _consoleBox.BackColor   = Theme.ConsoleBg;
         _consoleBox.ForeColor   = Theme.ConsoleText;
         _consoleBox.ReadOnly    = true;
-        _consoleBox.WordWrap    = false;
-        _consoleBox.ScrollBars  = RichTextBoxScrollBars.Both;
+        // Wrap long paths and alert messages. A horizontal scrollbar is
+        // easy to miss in the dark theme and previously left the important
+        // tail of each line visually clipped.
+        _consoleBox.WordWrap    = true;
+        _consoleBox.ScrollBars  = RichTextBoxScrollBars.ForcedVertical;
         _consoleBox.BorderStyle = BorderStyle.None;
-        page.Controls.Add(_consoleBox);
+        consoleHost.Controls.Add(_consoleBox);
 
         return page;
     }

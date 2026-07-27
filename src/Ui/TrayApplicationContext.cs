@@ -8,6 +8,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Reflection;
+using System.Threading;
 using System.Windows.Forms;
 using WhitehatSecurity.Core;
 using WhitehatSecurity.Engines;
@@ -24,6 +25,10 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly DashboardSink    _dashboardSink;
     private readonly ConsoleSink      _consoleSink;
     private readonly string           _configPath;
+    private readonly EventWaitHandle  _instanceSignal;
+    private readonly System.Windows.Forms.Timer _instanceTimer;
+    private readonly System.Windows.Forms.Timer _promoteTimer;
+    private readonly Control _uiInvoker = new();
     private DashboardForm?            _dashboard;
 
     public TrayApplicationContext(
@@ -31,13 +36,22 @@ public sealed class TrayApplicationContext : ApplicationContext
         Logger       logger,
         MonitorHost  host,
         ConsoleSink  consoleSink,
-        string       configPath)
+        string       configPath,
+        EventWaitHandle instanceSignal)
     {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(consoleSink);
+        ArgumentException.ThrowIfNullOrWhiteSpace(configPath);
+        ArgumentNullException.ThrowIfNull(instanceSignal);
         _config      = config;
         _logger      = logger;
         _host        = host;
         _consoleSink = consoleSink;
         _configPath  = configPath;
+        _instanceSignal = instanceSignal;
+        _uiInvoker.CreateControl();
 
         _tray = new NotifyIcon
         {
@@ -57,15 +71,15 @@ public sealed class TrayApplicationContext : ApplicationContext
         _dashboardSink = new DashboardSink();
         host.AddSink(_dashboardSink);
         host.AddSink(_consoleSink);
-        host.AddSink(new ToastNotifier(_tray, _config));
+        host.AddSink(new ToastNotifier(_tray, _config, _uiInvoker));
 
         host.Start();
 
         // Windows 11 IsPromoted fix — runs on a delay so Explorer has time to
         // create the registry entry after Visible = true.
-        var promoteTimer = new System.Windows.Forms.Timer { Interval = 700 };
+        _promoteTimer = new System.Windows.Forms.Timer { Interval = 700 };
         int attempts = 0;
-        promoteTimer.Tick += (_, _) =>
+        _promoteTimer.Tick += (_, _) =>
         {
             attempts++;
             int updated = NotifyIconPromote.Promote(GetExeNameHint());
@@ -75,16 +89,22 @@ public sealed class TrayApplicationContext : ApplicationContext
                 // Toggle visibility once so Explorer re-evaluates promotion
                 _tray.Visible = false;
                 _tray.Visible = true;
-                promoteTimer.Stop();
-                promoteTimer.Dispose();
+                _promoteTimer.Stop();
             }
             else if (attempts >= 10)
             {
-                promoteTimer.Stop();
-                promoteTimer.Dispose();
+                _promoteTimer.Stop();
             }
         };
-        promoteTimer.Start();
+        _promoteTimer.Start();
+
+        _instanceTimer = new System.Windows.Forms.Timer { Interval = 250 };
+        _instanceTimer.Tick += (_, _) =>
+        {
+            if (_instanceSignal.WaitOne(0))
+                OpenDashboard();
+        };
+        _instanceTimer.Start();
     }
 
     private static string GetExeNameHint()
@@ -103,7 +123,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             _dashboard.FormClosed += (_, _) => _dashboard = null;
         }
         _dashboard.Show();
-        _dashboard.WindowState = FormWindowState.Normal;
+        if (_dashboard.WindowState == FormWindowState.Minimized)
+            _dashboard.WindowState = FormWindowState.Normal;
         _dashboard.BringToFront();
         _dashboard.Activate();
         if (tab is not null) _dashboard.OpenTab(tab);
@@ -121,11 +142,28 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add("Exit", null, (_, _) =>
         {
             _host.Stop();
+            _instanceTimer.Stop();
+            _promoteTimer.Stop();
             _tray.Visible = false;
-            _tray.Dispose();
             ExitThread();
         });
         return menu;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _instanceTimer.Stop();
+            _instanceTimer.Dispose();
+            _promoteTimer.Stop();
+            _promoteTimer.Dispose();
+            _dashboard?.Dispose();
+            _tray.ContextMenuStrip?.Dispose();
+            _tray.Dispose();
+            _uiInvoker.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     /// <summary>
@@ -229,7 +267,17 @@ public sealed class DashboardSink : IAlertSink
 
     public void Receive(Alert alert)
     {
-        lock (_lock) _buffer.Add(alert);
+        lock (_lock)
+        {
+            _buffer.Add(alert);
+            if (_buffer.Count > 5000)
+                _buffer.RemoveRange(0, _buffer.Count - 5000);
+        }
         try { AlertReceived?.Invoke(alert); } catch { }
+    }
+
+    public void Clear()
+    {
+        lock (_lock) _buffer.Clear();
     }
 }

@@ -27,6 +27,7 @@ public sealed class HiddenProcessEngine : IMonitorEngine
     /// for the same hidden process every scan cycle.
     /// </summary>
     private readonly HashSet<int> _alerted = new();
+    private readonly HashSet<int> _pending = new();
 
     public void Initialize()
     {
@@ -58,11 +59,17 @@ public sealed class HiddenProcessEngine : IMonitorEngine
             return alerts;
         }
 
-        // PIDs visible to the kernel but missing from user mode = hidden process
-        foreach (var pid in kernel)
+        var mismatches = kernel
+            .Where(pid => pid > 4 && !userMode.Contains(pid))
+            .ToHashSet();
+        _alerted.IntersectWith(mismatches);
+        _pending.IntersectWith(mismatches);
+
+        // A mismatch must persist for two scans. Process exit races between
+        // the kernel and user-mode snapshots otherwise create false alarms.
+        foreach (var pid in mismatches)
         {
-            if (pid <= 4) continue;        // System Idle / System
-            if (userMode.Contains(pid)) continue;
+            if (_pending.Add(pid)) continue;
             if (!_alerted.Add(pid)) continue;
 
             alerts.Add(new Alert(

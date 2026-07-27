@@ -5,6 +5,7 @@
 // by either implementation are interchangeable.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -18,6 +19,12 @@ namespace WhitehatSecurity.Core;
 /// </summary>
 public sealed class NotifyConfig
 {
+    private static readonly HashSet<string> ValidDnsProviders =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "None", "Cloudflare", "Quad9", "Google", "OpenDNS", "AdGuard",
+        };
+
     /// <summary>
     /// Schema version of the on-disk JSON. Bumped whenever a field is
     /// added/removed/renamed so a future migration step can recognise an
@@ -165,15 +172,7 @@ public sealed class NotifyConfig
             try
             {
                 var raw = File.ReadAllText(path);
-                var loaded = JsonSerializer.Deserialize<NotifyConfig>(raw, JsonOpts);
-                if (loaded is not null)
-                {
-                    // Future migration hook: if SchemaVersion < CurrentSchema,
-                    // run any conversion here. Currently we only support v1
-                    // so a missing/zero version is treated as v1.
-                    if (loaded.SchemaVersion == 0) loaded.SchemaVersion = 1;
-                    return loaded;
-                }
+                return LoadStrictJson(raw);
             }
             catch
             {
@@ -193,6 +192,36 @@ public sealed class NotifyConfig
         var fresh = Defaults();
         try { fresh.Save(path); } catch { /* best effort */ }
         return fresh;
+    }
+
+    /// <summary>
+    /// Loads a configuration without modifying the source file. Import uses
+    /// this path so malformed or future-schema files are never replaced with
+    /// defaults and then reported as a successful import.
+    /// </summary>
+    public static NotifyConfig LoadStrict(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return LoadStrictJson(File.ReadAllText(path));
+    }
+
+    private static NotifyConfig LoadStrictJson(string raw)
+    {
+        var loaded = JsonSerializer.Deserialize<NotifyConfig>(raw, JsonOpts)
+            ?? throw new InvalidDataException("The configuration is empty.");
+
+        if (loaded.SchemaVersion == 0)
+            loaded.SchemaVersion = 1;
+        if (loaded.SchemaVersion != 1)
+            throw new InvalidDataException(
+                $"Unsupported configuration schema {loaded.SchemaVersion}.");
+        if (!ValidDnsProviders.Contains(loaded.DNS_Provider ?? string.Empty))
+            throw new InvalidDataException(
+                $"Unknown DNS provider '{loaded.DNS_Provider}'.");
+        if (loaded.DNS_Provider is "None" or "OpenDNS")
+            loaded.DNS_DoH = false;
+
+        return loaded;
     }
 
     public void Save(string path)
@@ -219,8 +248,8 @@ public sealed class NotifyConfig
             // Fallback for the rare filesystem where atomic Move fails:
             // fall back to a plain copy + delete. Slightly less safe but
             // still better than the original WriteAllText.
-            try { File.Copy(tmp, path, overwrite: true); File.Delete(tmp); }
-            catch { }
+            File.Copy(tmp, path, overwrite: true);
+            File.Delete(tmp);
         }
     }
 }

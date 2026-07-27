@@ -40,16 +40,19 @@ public sealed class ServiceEngine : IMonitorEngine
         }
     }
 
-    private static IEnumerable<string> EnumerateServiceNames()
+    private static string[] EnumerateServiceNames()
     {
         ServiceController[] all;
         try { all = ServiceController.GetServices(); }
-        catch { yield break; }
-
-        foreach (var sc in all)
+        catch { return Array.Empty<string>(); }
+        try
         {
-            yield return sc.ServiceName;
-            sc.Dispose();
+            return all.Select(service => service.ServiceName).ToArray();
+        }
+        finally
+        {
+            foreach (var service in all)
+                service.Dispose();
         }
     }
 }

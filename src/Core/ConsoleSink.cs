@@ -25,6 +25,7 @@ public sealed class ConsoleSink : IAlertSink
 
     public void WriteLine(string line)
     {
+        ArgumentNullException.ThrowIfNull(line);
         var stamp = $"[{DateTime.Now:HH:mm:ss}] {line}";
         lock (_lock)
         {
@@ -40,11 +41,21 @@ public sealed class ConsoleSink : IAlertSink
 
     public void Receive(Alert alert)
     {
+        ArgumentNullException.ThrowIfNull(alert);
         WriteLine($"[{alert.Severity.ToString().ToUpperInvariant()}] {alert.Category} - {alert.Title}: {alert.Message}");
     }
 
     public IReadOnlyCollection<string> Snapshot()
     {
         lock (_lock) return _lines.ToArray();
+    }
+
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _lines.Clear();
+            LinesDropped = 0;
+        }
     }
 }

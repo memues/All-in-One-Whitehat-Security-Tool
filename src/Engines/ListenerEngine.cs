@@ -17,11 +17,13 @@ public sealed class ListenerEngine : IMonitorEngine
     public string Name => "Listeners";
 
     private readonly HashSet<string> _known = new();
+    private readonly Queue<string> _knownOrder = new();
+    private const int MaxKnown = 10_000;
 
     public void Initialize()
     {
         foreach (var l in EnumerateListeners())
-            _known.Add(Key(l));
+            AddKnown(Key(l));
     }
 
     public IEnumerable<Alert> Scan()
@@ -29,7 +31,7 @@ public sealed class ListenerEngine : IMonitorEngine
         foreach (var l in EnumerateListeners())
         {
             var key = Key(l);
-            if (_known.Add(key))
+            if (AddKnown(key))
             {
                 yield return new Alert(
                     Timestamp:   DateTime.Now,
@@ -45,6 +47,15 @@ public sealed class ListenerEngine : IMonitorEngine
         }
     }
 
+    private bool AddKnown(string key)
+    {
+        if (!_known.Add(key)) return false;
+        _knownOrder.Enqueue(key);
+        while (_knownOrder.Count > MaxKnown)
+            _known.Remove(_knownOrder.Dequeue());
+        return true;
+    }
+
     private readonly record struct ListenerRecord(
         string  LocalIp,
         int     LocalPort,
@@ -55,12 +66,14 @@ public sealed class ListenerEngine : IMonitorEngine
 
     private static IEnumerable<ListenerRecord> EnumerateListeners()
     {
+        const uint ErrorInsufficientBuffer = 122;
         int size = 0;
-        NativeMethods.GetExtendedTcpTable(
+        var sizeRc = NativeMethods.GetExtendedTcpTable(
             IntPtr.Zero, ref size, false,
             NativeMethods.AF_INET,
             TcpTableClass.OwnerPidListener, 0);
 
+        if (sizeRc is not (0 or ErrorInsufficientBuffer)) yield break;
         if (size <= 0) yield break;
 
         IntPtr buffer = Marshal.AllocHGlobal(size);

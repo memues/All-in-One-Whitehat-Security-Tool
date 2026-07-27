@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Watches Run/RunOnce keys and the tamper-key list from the PowerShell port
-// (~line 6772). When a value under any of these keys changes, an alert is
-// raised — independent of whether the change is benign (Windows Update) or
-// malicious. The PS port had this exact "high noise, high signal" tradeoff.
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Win32;
 using WhitehatSecurity.Core;
 
@@ -15,19 +12,8 @@ public sealed class RegistryEngine : IMonitorEngine
 {
     public string Name => "Registry";
 
-    /// <summary>
-    /// (RegistryHive, RegistryView, KeyPath, ValueName) → last observed
-    /// string-form value. The RegistryView part lets us track the 32-bit
-    /// (WOW6432Node) and 64-bit views of the same key independently — both
-    /// are valid persistence locations on a 64-bit system.
-    /// </summary>
-    private readonly Dictionary<(RegistryHive, RegistryView, string, string), string?> _baseline = new();
+    private readonly Dictionary<RegistrySlot, string?> _baseline = new();
 
-    /// <summary>
-    /// Both views are scanned on 64-bit systems. The 32-bit view sees the
-    /// WOW6432Node namespace, where some malware hides persistence to evade
-    /// 64-bit-only scanners.
-    /// </summary>
     private static readonly RegistryView[] WatchedViews =
         Environment.Is64BitOperatingSystem
             ? new[] { RegistryView.Registry64, RegistryView.Registry32 }
@@ -35,13 +21,10 @@ public sealed class RegistryEngine : IMonitorEngine
 
     private static readonly (RegistryHive Hive, string Key, string Value)[] WatchedValues =
     {
-        // Persistence keys
         (RegistryHive.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "*"),
         (RegistryHive.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", "*"),
         (RegistryHive.CurrentUser,  @"Software\Microsoft\Windows\CurrentVersion\Run", "*"),
         (RegistryHive.CurrentUser,  @"Software\Microsoft\Windows\CurrentVersion\RunOnce", "*"),
-
-        // Tamper-key list — same set as PS port line ~6772-6800
         (RegistryHive.LocalMachine, @"SOFTWARE\Policies\Microsoft\Windows Defender", "DisableAntiSpyware"),
         (RegistryHive.LocalMachine, @"SOFTWARE\Policies\Microsoft\Windows Defender", "DisableAntiVirus"),
         (RegistryHive.LocalMachine, @"SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection", "DisableRealtimeMonitoring"),
@@ -61,81 +44,125 @@ public sealed class RegistryEngine : IMonitorEngine
     public void Initialize()
     {
         foreach (var view in WatchedViews)
-            foreach (var (hive, key, name) in WatchedValues)
-                ScanKey(hive, view, key, name, baselineMode: true);
+            foreach (var watched in WatchedValues)
+                Capture(watched.Hive, view, watched.Key, watched.Value, true, null);
     }
 
     public IEnumerable<Alert> Scan()
     {
         var alerts = new List<Alert>();
         foreach (var view in WatchedViews)
-            foreach (var (hive, key, name) in WatchedValues)
-                ScanKey(hive, view, key, name, baselineMode: false, alerts: alerts);
+            foreach (var watched in WatchedValues)
+                Capture(
+                    watched.Hive, view, watched.Key, watched.Value,
+                    false, alerts);
         return alerts;
     }
 
-    private void ScanKey(
-        RegistryHive  hive,
-        RegistryView  view,
-        string        keyPath,
-        string        valueNameOrStar,
-        bool          baselineMode,
-        List<Alert>?  alerts = null)
+    private void Capture(
+        RegistryHive hive,
+        RegistryView view,
+        string keyPath,
+        string valueNameOrStar,
+        bool baselineMode,
+        List<Alert>? alerts)
     {
+        Dictionary<string, string?> current;
         try
         {
-            using var rootKey = RegistryKey.OpenBaseKey(hive, view);
-            using var sub = rootKey.OpenSubKey(keyPath);
-            if (sub is null) return;
+            using var root = RegistryKey.OpenBaseKey(hive, view);
+            using var key = root.OpenSubKey(keyPath);
+            if (key is null) return;
 
-            var valueNames = valueNameOrStar == "*"
-                ? sub.GetValueNames()
-                : new[] { valueNameOrStar };
-
-            foreach (var vn in valueNames)
+            current = new Dictionary<string, string?>(
+                StringComparer.OrdinalIgnoreCase);
+            if (valueNameOrStar == "*")
             {
-                var current = sub.GetValue(vn)?.ToString();
-                var slot = (hive, view, keyPath, vn);
-
-                if (baselineMode)
-                {
-                    _baseline[slot] = current;
-                    continue;
-                }
-
-                if (!_baseline.TryGetValue(slot, out var prev))
-                {
-                    _baseline[slot] = current;
-                    if (current is not null)
-                        alerts?.Add(MakeAlert(hive, view, keyPath, vn, "added", current));
-                }
-                else if (!Equals(prev, current))
-                {
-                    _baseline[slot] = current;
-                    alerts?.Add(MakeAlert(hive, view, keyPath, vn, "changed", $"{prev} -> {current}"));
-                }
+                foreach (var name in key.GetValueNames())
+                    current[name] = key.GetValue(name)?.ToString();
+            }
+            else
+            {
+                current[valueNameOrStar] =
+                    key.GetValue(valueNameOrStar)?.ToString();
             }
         }
         catch
         {
-            // unreachable key — leave the baseline alone
+            return;
+        }
+
+        foreach (var (name, value) in current)
+        {
+            var slot = new RegistrySlot(hive, view, keyPath, name);
+            if (baselineMode)
+            {
+                _baseline[slot] = value;
+                continue;
+            }
+
+            if (!_baseline.TryGetValue(slot, out var previous))
+            {
+                _baseline[slot] = value;
+                if (value is not null)
+                    alerts?.Add(MakeAlert(slot, "added", value));
+            }
+            else if (!string.Equals(previous, value, StringComparison.Ordinal))
+            {
+                _baseline[slot] = value;
+                var action = value is null ? "removed" : "changed";
+                alerts?.Add(MakeAlert(
+                    slot, action, $"{previous ?? "(missing)"} -> {value ?? "(missing)"}"));
+            }
+        }
+
+        if (valueNameOrStar != "*" || baselineMode) return;
+
+        var removed = _baseline.Keys.Where(slot =>
+                slot.Hive == hive
+                && slot.View == view
+                && string.Equals(
+                    slot.KeyPath, keyPath,
+                    StringComparison.OrdinalIgnoreCase)
+                && !current.ContainsKey(slot.ValueName))
+            .ToList();
+        foreach (var slot in removed)
+        {
+            var previous = _baseline[slot];
+            _baseline.Remove(slot);
+            alerts?.Add(MakeAlert(
+                slot, "removed", previous ?? "(missing)"));
         }
     }
 
     private static Alert MakeAlert(
-        RegistryHive hive,
-        RegistryView view,
-        string       keyPath,
-        string       value,
-        string       action,
-        string       detail)
+        RegistrySlot slot, string action, string detail)
     {
-        var viewTag = view == RegistryView.Registry32 ? " (32)" : "";
+        var viewTag = slot.View == RegistryView.Registry32 ? " (32)" : "";
+        var root = slot.Hive switch
+        {
+            RegistryHive.LocalMachine => "HKEY_LOCAL_MACHINE",
+            RegistryHive.CurrentUser => "HKEY_CURRENT_USER",
+            _ => slot.Hive.ToString(),
+        };
+        var registryPath = $"{root}\\{slot.KeyPath}";
+        var displayPath = $"{root}{viewTag}\\{slot.KeyPath}";
         return new Alert(
-            Timestamp: DateTime.Now,
-            Category:  "Registry",
-            Title:     $"REGISTRY {action.ToUpperInvariant()}",
-            Message:   $"{hive}{viewTag}\\{keyPath}!{value}: {detail}",
-            Severity:  AlertSeverity.Med);
+            DateTime.Now,
+            "Registry",
+            $"REGISTRY {action.ToUpperInvariant()}",
+            $"{displayPath}!{slot.ValueName}: {detail}",
+            AlertSeverity.Med,
+            Extra: new Dictionary<string, string>
+            {
+                ["RegistryPath"] = registryPath,
+                ["ValueName"] = slot.ValueName,
+            });
     }
+
+    private readonly record struct RegistrySlot(
+        RegistryHive Hive,
+        RegistryView View,
+        string KeyPath,
+        string ValueName);
 }

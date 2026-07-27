@@ -10,13 +10,18 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using WhitehatSecurity.Core;
 
 namespace WhitehatSecurity.Ui;
 
 public sealed partial class DashboardForm : Form
 {
+    private static readonly System.Text.Json.JsonSerializerOptions JsonExportOptions =
+        new() { WriteIndented = true };
+
     private readonly NotifyConfig  _config;
     private readonly Logger        _logger;
     private readonly DashboardSink _sink;
@@ -72,6 +77,7 @@ public sealed partial class DashboardForm : Form
     private readonly Dictionary<string, Label>    _postureLabels      = new();
     private readonly ListView _aiResultsList = new();
     private readonly Label    _aiStatusLabel = new();
+    private ComboBox? _dnsProviderCombo;
     private Alert? _selectedAlert;
 
     /// <summary>
@@ -114,6 +120,11 @@ public sealed partial class DashboardForm : Form
         {
             _sink.AlertReceived       -= OnAlertReceived;
             _consoleSink.LineAppended -= OnConsoleLineAppended;
+            try { _aiScanCts?.Cancel(); } catch { }
+            _aiScanCts?.Dispose();
+            _aiScanCts = null;
+            _alertContextMenu?.Dispose();
+            _alertContextMenu = null;
         };
 
         // Periodic refresher for the Status page. Two separate cadences:
@@ -182,34 +193,47 @@ public sealed partial class DashboardForm : Form
         if (System.Threading.Interlocked.CompareExchange(ref _postureRefreshing, 1, 0) != 0)
             return;
 
-        System.Threading.Tasks.Task.Run(() =>
+        _ = System.Threading.Tasks.Task.Run(async () =>
         {
-            // Run the eight queries on the background thread. Each one is
-            // already wrapped in try/catch inside SecurityPosture, so we
-            // never propagate.
-            var snapshot = new (string Key, PostureState State)[]
+            // Run probes independently. One slow WMI provider used to hold
+            // the entire row at "Unknown" because all eight calls ran
+            // sequentially and the UI was updated only after the last call.
+            var probes = new (string Key, Func<PostureState> Probe)[]
             {
-                ("Defender",   SecurityPosture.Defender()),
-                ("Firewall",   SecurityPosture.Firewall()),
-                ("UAC",        SecurityPosture.UAC()),
-                ("RDP",        SecurityPosture.RdpOff()),
-                ("SecureBoot", SecurityPosture.SecureBoot()),
-                ("TPM",        SecurityPosture.Tpm()),
-                ("HVCI",       SecurityPosture.Hvci()),
-                ("BitLocker",  SecurityPosture.BitLocker()),
+                ("Defender",   SecurityPosture.Defender),
+                ("Firewall",   SecurityPosture.Firewall),
+                ("UAC",        SecurityPosture.UAC),
+                ("RDP",        SecurityPosture.RdpOff),
+                ("SecureBoot", SecurityPosture.SecureBoot),
+                ("TPM",        SecurityPosture.Tpm),
+                ("HVCI",       SecurityPosture.Hvci),
+                ("BitLocker",  SecurityPosture.BitLocker),
             };
+            var tasks = probes
+                .Select(probe => System.Threading.Tasks.Task.Run(probe.Probe))
+                .ToArray();
 
-            // Marshal back to the UI thread to update the labels.
             try
             {
-                if (!IsDisposed)
+                var allProbes = System.Threading.Tasks.Task.WhenAll(tasks);
+                await System.Threading.Tasks.Task.WhenAny(
+                    allProbes,
+                    System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(5)))
+                    .ConfigureAwait(false);
+
+                // Publish every completed result after at most five seconds.
+                // Incomplete probes remain Unknown; fast registry/service
+                // checks are never held hostage by a slow WMI namespace.
+                PostSnapshot(probes, tasks);
+
+                // Keep the coalescing flag set until stragglers finish so a
+                // permanently slow WMI provider cannot create an unbounded
+                // queue of duplicate probes. If they do finish, publish the
+                // complete snapshot immediately.
+                if (!allProbes.IsCompleted)
                 {
-                    BeginInvoke(new Action(() =>
-                    {
-                        if (IsDisposed) return;
-                        foreach (var (key, state) in snapshot)
-                            SetPosture(key, state);
-                    }));
+                    await allProbes.ConfigureAwait(false);
+                    PostSnapshot(probes, tasks);
                 }
             }
             catch
@@ -223,6 +247,31 @@ public sealed partial class DashboardForm : Form
         });
     }
 
+    private void PostSnapshot(
+        IReadOnlyList<(string Key, Func<PostureState> Probe)> probes,
+        IReadOnlyList<System.Threading.Tasks.Task<PostureState>> tasks)
+    {
+        try
+        {
+            if (IsDisposed) return;
+            var snapshot = probes.Select((probe, index) =>
+                (probe.Key,
+                 tasks[index].Status == System.Threading.Tasks.TaskStatus.RanToCompletion
+                    ? tasks[index].Result
+                    : PostureState.Unknown)).ToArray();
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed) return;
+                foreach (var (key, state) in snapshot)
+                    SetPosture(key, state);
+            }));
+        }
+        catch
+        {
+            // The form can close between the IsDisposed check and BeginInvoke.
+        }
+    }
+
     private void SetPosture(string key, PostureState state)
     {
         if (!_postureLabels.TryGetValue(key, out var lbl) || lbl.IsDisposed) return;
@@ -233,6 +282,16 @@ public sealed partial class DashboardForm : Form
             PostureState.NA   => Theme.PostureNa,
             _                 => Theme.PostureNa,
         };
+        var stateText = state switch
+        {
+            PostureState.Good when key == "RDP" => "Off",
+            PostureState.Bad when key == "RDP"  => "On",
+            PostureState.Good                   => "On",
+            PostureState.Bad                    => "Off",
+            _                                   => "Unknown",
+        };
+        lbl.Text = $"● {key}: {stateText}";
+        lbl.AccessibleName = $"{key}: {stateText}";
     }
 
     // -----------------------------------------------------------------------
@@ -379,11 +438,7 @@ public sealed partial class DashboardForm : Form
     }
 
     private static string CsvField(string s)
-    {
-        if (s.Contains(',') || s.Contains('"') || s.Contains('\n'))
-            return "\"" + s.Replace("\"", "\"\"") + "\"";
-        return s;
-    }
+        => CsvSafety.Escape(s);
 
     private void OnClearAlertsClick(object? sender, EventArgs e)
     {
@@ -397,6 +452,7 @@ public sealed partial class DashboardForm : Form
         if (ans != DialogResult.Yes) return;
 
         _allAlerts.Clear();
+        _sink.Clear();
         _alertsList.BeginUpdate();
         try { _alertsList.Items.Clear(); }
         finally { _alertsList.EndUpdate(); }
@@ -451,7 +507,7 @@ public sealed partial class DashboardForm : Form
     private ToolStripMenuItem _ctxIpLookup    = new() { Text = "IP lookup" };
     private ToolStripMenuItem _ctxBlockIp     = new() { Text = "Block IP" };
     private ToolStripMenuItem _ctxKill        = new() { Text = "Kill process" };
-    private ToolStripMenuItem _ctxOpenLog     = new() { Text = "Open log file" };
+    private ToolStripMenuItem _ctxOpenLog     = new() { Text = "Show file in Explorer" };
     private ToolStripMenuItem _ctxRegedit     = new() { Text = "Open in regedit" };
 
     private void OnExportJsonClick(object? sender, EventArgs e)
@@ -471,7 +527,7 @@ public sealed partial class DashboardForm : Form
                 a.ProcessName, a.ProcessId, a.Path,
             });
             var json = System.Text.Json.JsonSerializer.Serialize(rows,
-                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                JsonExportOptions);
             File.WriteAllText(dlg.FileName, json);
         }
         catch (Exception ex) { _logger.Error($"Export JSON: {ex.Message}"); }
@@ -591,9 +647,18 @@ public sealed partial class DashboardForm : Form
         // Live insert into the visible list only if the current filters allow.
         if (MatchesAlertFilters(a))
         {
-            _alertsList.Items.Insert(0, MakeAlertItem(a));
+            var inserted = MakeAlertItem(a);
+            _alertsList.Items.Insert(0, inserted);
             while (_alertsList.Items.Count > 1000)
                 _alertsList.Items.RemoveAt(_alertsList.Items.Count - 1);
+            if (_navPages.TryGetValue("Alerts", out var alertsPage)
+                && alertsPage.Visible
+                && _alertsList.SelectedItems.Count == 0)
+            {
+                inserted.Selected = true;
+                inserted.Focused = true;
+                inserted.EnsureVisible();
+            }
         }
 
         // Mirror the most recent 10 into the Status page "Recent Alerts" list
@@ -620,6 +685,7 @@ public sealed partial class DashboardForm : Form
         _alertDetailTitle.Text = "Select an alert to view details";
         _alertDetailTitle.ForeColor = Theme.TextDim;
         _alertDetailBody.Text = "";
+        _alertDetailBody.Visible = false;
         _btnIpLookup.Visible    = false;
         _btnOpenLog.Visible     = false;
         _btnRegedit.Visible     = false;
@@ -636,14 +702,17 @@ public sealed partial class DashboardForm : Form
             ? Theme.SevCrit
             : Theme.AccentBlue;
 
-        // ShowThreatDetails: when off, the title is shown but the body and
-        // action buttons are hidden. The user can re-enable details from
-        // Settings without needing to restart.
         bool showFull = _config.ShowThreatDetails;
-        _alertDetailBody.Visible = showFull;
+        _alertDetailBody.Visible = true;
 
         if (!showFull)
         {
+            _alertDetailBody.Text =
+                $"Time:     {a.Timestamp:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
+                $"Category: {a.Category}{Environment.NewLine}{Environment.NewLine}" +
+                a.Message +
+                $"{Environment.NewLine}{Environment.NewLine}" +
+                "Enable “Detailed Threat Info” in Settings to show sensitive paths, process data, and response actions.";
             _btnIpLookup.Visible    = false;
             _btnBlockIp.Visible     = false;
             _btnOpenLog.Visible     = false;
@@ -675,7 +744,7 @@ public sealed partial class DashboardForm : Form
         _btnBlockIp.Visible     = a.RemoteIp is not null;
         _btnOpenLog.Visible     = a.Path is not null && File.Exists(a.Path);
         _btnRegedit.Visible     = a.Category == "Registry";
-        _btnRestoreReg.Visible  = a.Category == "Registry";
+        _btnRestoreReg.Visible  = false;
         if (a.ProcessId is int pid && pid > 0)
         {
             _btnKillProcess.Visible = true;
@@ -709,7 +778,8 @@ public sealed partial class DashboardForm : Form
         if (_selectedAlert?.Path is not string p || !File.Exists(p)) return;
         try
         {
-            Process.Start(new ProcessStartInfo("notepad.exe", '"' + p + '"')
+            Process.Start(new ProcessStartInfo(
+                "explorer.exe", $"/select,\"{p}\"")
             {
                 UseShellExecute = true,
             });
@@ -721,6 +791,14 @@ public sealed partial class DashboardForm : Form
     {
         try
         {
+            if (_selectedAlert?.Extra is not null
+                && _selectedAlert.Extra.TryGetValue(
+                    "RegistryPath", out var registryPath))
+            {
+                using var key = Registry.CurrentUser.CreateSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit");
+                key?.SetValue("LastKey", registryPath);
+            }
             Process.Start(new ProcessStartInfo("regedit.exe") { UseShellExecute = true });
         }
         catch (Exception ex) { _logger.Error($"Regedit: {ex.Message}"); }
@@ -754,7 +832,21 @@ public sealed partial class DashboardForm : Form
 
         try
         {
-            Process.GetProcessById(pid).Kill();
+            using var process = Process.GetProcessById(pid);
+            if (!string.IsNullOrWhiteSpace(_selectedAlert.ProcessName)
+                && !string.Equals(
+                    process.ProcessName,
+                    _selectedAlert.ProcessName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    "The process ID now belongs to a different process. The action was cancelled.",
+                    "Kill Process",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+            process.Kill();
             MessageBox.Show("Process killed.", "Kill Process", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch
@@ -775,7 +867,7 @@ public sealed partial class DashboardForm : Form
     /// Single CheckedChanged handler for every checkbox on the Settings page.
     /// The Tag of each checkbox holds the JSON key name; we route on that.
     /// </summary>
-    private void OnSettingsCheckChanged(object? sender, EventArgs e)
+    private async void OnSettingsCheckChanged(object? sender, EventArgs e)
     {
         if (sender is not CheckBox cb || cb.Tag is not string key) return;
 
@@ -796,70 +888,96 @@ public sealed partial class DashboardForm : Form
             case "EnableToastNotifications": _config.EnableToastNotifications = cb.Checked; break;
             case "BeepOnAlert":              _config.BeepOnAlert              = cb.Checked; break;
 
-            case "FW_DomainProfile":  TogglePrivileged(cb, () => _config.FW_DomainProfile  = cb.Checked,
+            case "FW_DomainProfile":  await TogglePrivilegedAsync(cb, () => _config.FW_DomainProfile  = cb.Checked,
                 () => ElevationHelper.SetFirewallProfile("Domain",  cb.Checked, _logger)); break;
-            case "FW_PrivateProfile": TogglePrivileged(cb, () => _config.FW_PrivateProfile = cb.Checked,
+            case "FW_PrivateProfile": await TogglePrivilegedAsync(cb, () => _config.FW_PrivateProfile = cb.Checked,
                 () => ElevationHelper.SetFirewallProfile("Private", cb.Checked, _logger)); break;
-            case "FW_PublicProfile":  TogglePrivileged(cb, () => _config.FW_PublicProfile  = cb.Checked,
+            case "FW_PublicProfile":  await TogglePrivilegedAsync(cb, () => _config.FW_PublicProfile  = cb.Checked,
                 () => ElevationHelper.SetFirewallProfile("Public",  cb.Checked, _logger)); break;
 
-            case "FW_BlockInbound":   TogglePrivileged(cb, () => _config.FW_BlockInbound   = cb.Checked,
+            case "FW_BlockInbound":   await TogglePrivilegedAsync(cb, () => _config.FW_BlockInbound   = cb.Checked,
                 () => ElevationHelper.SetBlockInboundRule(cb.Checked, _logger)); break;
             case "FW_BlockOutbound":
                 if (cb.Checked && MessageBox.Show(
                     "WARNING: This blocks ALL outgoing traffic.\nApplications may stop working. Continue?",
                     "Block Outbound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 {
-                    cb.Checked = false; return;
+                    SetCheckedWithoutHandler(cb, false); return;
                 }
-                TogglePrivileged(cb, () => _config.FW_BlockOutbound = cb.Checked,
+                await TogglePrivilegedAsync(cb, () => _config.FW_BlockOutbound = cb.Checked,
                     () => ElevationHelper.SetBlockOutboundRule(cb.Checked, _logger));
                 break;
-            case "FW_BlockPing":      TogglePrivileged(cb, () => _config.FW_BlockPing      = cb.Checked,
+            case "FW_BlockPing":      await TogglePrivilegedAsync(cb, () => _config.FW_BlockPing      = cb.Checked,
                 () => ElevationHelper.SetBlockPingRule(cb.Checked, _logger)); break;
             case "FW_BlockLAN":
                 if (cb.Checked && MessageBox.Show(
                     "WARNING: This isolates this PC from your local network. Continue?",
                     "Block LAN", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 {
-                    cb.Checked = false; return;
+                    SetCheckedWithoutHandler(cb, false); return;
                 }
-                TogglePrivileged(cb, () => _config.FW_BlockLAN = cb.Checked,
+                await TogglePrivilegedAsync(cb, () => _config.FW_BlockLAN = cb.Checked,
                     () => ElevationHelper.SetBlockLanRule(cb.Checked, _logger));
                 break;
-            case "FW_BlockDevices":   TogglePrivileged(cb, () => _config.FW_BlockDevices = cb.Checked,
+            case "FW_BlockDevices":   await TogglePrivilegedAsync(cb, () => _config.FW_BlockDevices = cb.Checked,
                 () => ElevationHelper.SetBlockDevicesRule(cb.Checked, _logger)); break;
 
-            case "PF_BlockTrackers":  TogglePrivileged(cb, () => _config.PF_BlockTrackers  = cb.Checked,
+            case "PF_BlockTrackers":  await TogglePrivilegedAsync(cb, () => _config.PF_BlockTrackers  = cb.Checked,
                 () => ElevationHelper.SetHostsBlocklist("Trackers", cb.Checked, _logger)); break;
-            case "PF_BlockMalware":   TogglePrivileged(cb, () => _config.PF_BlockMalware   = cb.Checked,
+            case "PF_BlockMalware":   await TogglePrivilegedAsync(cb, () => _config.PF_BlockMalware   = cb.Checked,
                 () => ElevationHelper.SetHostsBlocklist("Malware", cb.Checked, _logger)); break;
-            case "PF_BlockTelemetry": TogglePrivileged(cb, () => _config.PF_BlockTelemetry = cb.Checked,
+            case "PF_BlockTelemetry": await TogglePrivilegedAsync(cb, () => _config.PF_BlockTelemetry = cb.Checked,
                 () => ElevationHelper.SetHostsBlocklist("Telemetry", cb.Checked, _logger)); break;
-            case "PF_BlockDNSBypass": TogglePrivileged(cb, () => _config.PF_BlockDNSBypass = cb.Checked,
-                () => ElevationHelper.SetDnsBypassBlock(cb.Checked, _logger)); break;
+            case "PF_BlockDNSBypass": SetCheckedWithoutHandler(cb, false); break;
 
-            case "DNS_DoH": TogglePrivileged(cb, () => _config.DNS_DoH = cb.Checked,
+            case "DNS_DoH": await TogglePrivilegedAsync(cb, () => _config.DNS_DoH = cb.Checked,
                 () => ElevationHelper.SetDnsOverHttps(cb.Checked, _config.DNS_Provider, _logger)); break;
         }
 
         SaveConfigSafe();
     }
 
-    private void OnDnsProviderChanged(object? sender, EventArgs e)
+    private async void OnDnsProviderChanged(object? sender, EventArgs e)
     {
         if (sender is not ComboBox cmb) return;
         var picked = cmb.SelectedItem?.ToString() ?? "None";
         if (picked == _config.DNS_Provider) return;
 
-        int rc = ElevationHelper.SetDnsProvider(picked, _logger);
+        cmb.Enabled = false;
+        int rc;
+        try
+        {
+            rc = await Task.Run(
+                () => ElevationHelper.SetDnsProvider(picked, _logger));
+        }
+        finally
+        {
+            if (!cmb.IsDisposed) cmb.Enabled = true;
+        }
         if (rc == 0)
         {
             _config.DNS_Provider = picked;
+            if (picked is "None" or "OpenDNS")
+                _config.DNS_DoH = false;
             SaveConfigSafe();
             // If DoH was enabled, re-apply with the new provider's DoH endpoint.
             if (_config.DNS_DoH)
-                ElevationHelper.SetDnsOverHttps(true, picked, _logger);
+            {
+                var dohRc = await Task.Run(() =>
+                    ElevationHelper.SetDnsOverHttps(true, picked, _logger));
+                if (dohRc != 0)
+                {
+                    _config.DNS_DoH = false;
+                    SaveConfigSafe();
+                    MessageBox.Show(
+                        "The DNS provider was changed, but DNS-over-HTTPS could not be applied. " +
+                        "DoH has been turned off so the dashboard matches the system state.",
+                        "Whitehat Security",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
+            ApplyDnsControlState();
         }
         else
         {
@@ -875,9 +993,16 @@ public sealed partial class DashboardForm : Form
     /// Helper that runs a privileged action via UAC, then either persists the
     /// new value or reverts the checkbox state if elevation failed.
     /// </summary>
-    private void TogglePrivileged(CheckBox cb, Action persist, Func<int> action)
+    private async Task TogglePrivilegedAsync(
+        CheckBox cb, Action persist, Func<int> action)
     {
-        int rc = action();
+        cb.Enabled = false;
+        int rc;
+        try { rc = await Task.Run(action); }
+        finally
+        {
+            if (!cb.IsDisposed) cb.Enabled = true;
+        }
         if (rc == 0)
         {
             persist();
@@ -887,9 +1012,7 @@ public sealed partial class DashboardForm : Form
         {
             // Revert visual state — user denied UAC, the helper failed,
             // or the elevated script returned non-zero.
-            cb.CheckedChanged -= OnSettingsCheckChanged;
-            cb.Checked = !cb.Checked;
-            cb.CheckedChanged += OnSettingsCheckChanged;
+            SetCheckedWithoutHandler(cb, !cb.Checked);
 
             // Surface the failure so the user understands why the toggle
             // bounced back. Previous versions reverted silently, which made
@@ -900,6 +1023,8 @@ public sealed partial class DashboardForm : Form
                 -3 => "the elevation request failed (UAC declined or system error).",
                 -4 => "the input value was empty or invalid.",
                 -5 => "the input value was rejected as unsafe.",
+                -6 => "this operation is disabled because it could also block the Windows DNS client.",
+                6  => "DNS-over-HTTPS is not supported by this Windows installation.",
                 _  => $"the elevated script exited with code {rc}.",
             };
             MessageBox.Show(
@@ -909,6 +1034,13 @@ public sealed partial class DashboardForm : Form
         }
     }
 
+    private void SetCheckedWithoutHandler(CheckBox cb, bool value)
+    {
+        cb.CheckedChanged -= OnSettingsCheckChanged;
+        cb.Checked = value;
+        cb.CheckedChanged += OnSettingsCheckChanged;
+    }
+
     // -----------------------------------------------------------------------
     //  Settings page action buttons (Reset / Export / Import)
     // -----------------------------------------------------------------------
@@ -916,11 +1048,9 @@ public sealed partial class DashboardForm : Form
     private void OnResetSettingsClick(object? sender, EventArgs e)
     {
         var ans = MessageBox.Show(
-            "Reset every setting to its default value?\n\n" +
-            "This only updates the local config file — privileged actions\n" +
-            "(firewall rules, hosts blocklists, DoH endpoints) keep their\n" +
-            "current state until you toggle them again.",
-            "Reset Settings",
+            "Reset notification and display preferences to defaults?\n\n" +
+            "Firewall, hosts-file, and DNS settings will not be changed.",
+            "Reset App Preferences",
             MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (ans != DialogResult.Yes) return;
 
@@ -928,7 +1058,7 @@ public sealed partial class DashboardForm : Form
         // Mutate _config in place so every other UI element that holds a
         // reference (the toast notifier, the alert gate via MonitorHost)
         // observes the new values immediately.
-        CopyConfig(fresh, _config);
+        CopyAppPreferences(fresh, _config);
         SaveConfigSafe();
         ApplyConfigToSettingsCheckboxes();
     }
@@ -959,11 +1089,13 @@ public sealed partial class DashboardForm : Form
                 Filter = "JSON (*.json)|*.json|All files (*.*)|*.*",
             };
             if (dlg.ShowDialog() != DialogResult.OK) return;
-            var loaded = NotifyConfig.LoadOrCreate(dlg.FileName);
-            CopyConfig(loaded, _config);
+            var loaded = NotifyConfig.LoadStrict(dlg.FileName);
+            CopyAppPreferences(loaded, _config);
             SaveConfigSafe();
             ApplyConfigToSettingsCheckboxes();
-            MessageBox.Show("Settings imported.", "Import",
+            MessageBox.Show(
+                "Notification and display preferences imported. System-level firewall, hosts-file, and DNS settings were left unchanged.",
+                "Import",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
@@ -980,7 +1112,8 @@ public sealed partial class DashboardForm : Form
     /// existing _config reference (held by sinks, gates, etc.) is updated
     /// in place rather than replaced.
     /// </summary>
-    private static void CopyConfig(NotifyConfig src, NotifyConfig dst)
+    private static void CopyAppPreferences(
+        NotifyConfig src, NotifyConfig dst)
     {
         dst.SchemaVersion            = src.SchemaVersion;
         dst.Firmware                 = src.Firmware;
@@ -996,20 +1129,6 @@ public sealed partial class DashboardForm : Form
         dst.ShowThreatDetails        = src.ShowThreatDetails;
         dst.EnableToastNotifications = src.EnableToastNotifications;
         dst.BeepOnAlert              = src.BeepOnAlert;
-        dst.FW_DomainProfile         = src.FW_DomainProfile;
-        dst.FW_PrivateProfile        = src.FW_PrivateProfile;
-        dst.FW_PublicProfile         = src.FW_PublicProfile;
-        dst.FW_BlockInbound          = src.FW_BlockInbound;
-        dst.FW_BlockOutbound         = src.FW_BlockOutbound;
-        dst.FW_BlockPing             = src.FW_BlockPing;
-        dst.FW_BlockLAN              = src.FW_BlockLAN;
-        dst.FW_BlockDevices          = src.FW_BlockDevices;
-        dst.PF_BlockTrackers         = src.PF_BlockTrackers;
-        dst.PF_BlockMalware          = src.PF_BlockMalware;
-        dst.PF_BlockTelemetry        = src.PF_BlockTelemetry;
-        dst.PF_BlockDNSBypass        = src.PF_BlockDNSBypass;
-        dst.DNS_Provider             = src.DNS_Provider;
-        dst.DNS_DoH                  = src.DNS_DoH;
     }
 
     /// <summary>
@@ -1055,6 +1174,28 @@ public sealed partial class DashboardForm : Form
                 _                          => cb.Checked,
             };
             cb.CheckedChanged += OnSettingsCheckChanged;
+        }
+        if (_dnsProviderCombo is not null)
+        {
+            _dnsProviderCombo.SelectedIndexChanged -= OnDnsProviderChanged;
+            _dnsProviderCombo.SelectedItem = _config.DNS_Provider;
+            _dnsProviderCombo.SelectedIndexChanged += OnDnsProviderChanged;
+        }
+        ApplyDnsControlState();
+    }
+
+    private void ApplyDnsControlState()
+    {
+        if (!_settingsCheckboxes.TryGetValue("DNS_DoH", out var doh))
+            return;
+        var supported = _config.DNS_Provider is
+            "Cloudflare" or "Quad9" or "Google" or "AdGuard";
+        doh.Enabled = supported;
+        if (!supported && doh.Checked)
+        {
+            SetCheckedWithoutHandler(doh, false);
+            _config.DNS_DoH = false;
+            SaveConfigSafe();
         }
     }
 
@@ -1170,6 +1311,16 @@ public sealed partial class DashboardForm : Form
         _consoleBox.SelectionColor  = colour;
         _consoleBox.AppendText(line + Environment.NewLine);
         _consoleBox.SelectionColor  = _consoleBox.ForeColor;
+        if (_consoleBox.Lines.Length > 2050)
+        {
+            var cutoff = _consoleBox.GetFirstCharIndexFromLine(
+                _consoleBox.Lines.Length - 2000);
+            if (cutoff > 0)
+            {
+                _consoleBox.Select(0, cutoff);
+                _consoleBox.SelectedText = string.Empty;
+            }
+        }
 
         if (_consoleAutoScroll.Checked)
         {
@@ -1197,6 +1348,7 @@ public sealed partial class DashboardForm : Form
 
     private void OnClearConsoleClick(object? sender, EventArgs e)
     {
+        _consoleSink.Clear();
         _consoleBox.Clear();
         _consoleDroppedLabel.Text = "";
     }

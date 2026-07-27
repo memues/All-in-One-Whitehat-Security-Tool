@@ -41,9 +41,17 @@ public sealed record Alert(
 public sealed class AlertGate
 {
     private readonly NotifyConfig _config;
-    public AlertGate(NotifyConfig config) => _config = config;
+    public AlertGate(NotifyConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        _config = config;
+    }
 
-    public bool ShouldRaise(Alert alert) => _config.IsCategoryEnabled(alert.Category);
+    public bool ShouldRaise(Alert alert)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        return _config.IsCategoryEnabled(alert.Category);
+    }
 }
 
 /// <summary>

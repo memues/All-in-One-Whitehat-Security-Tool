@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Driver baseline + change detection. Mirrors the New-DriverBaseline /
-// driver-diff blocks in SecurityMonitor.ps1.
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Management;
 using WhitehatSecurity.Core;
 
@@ -14,35 +11,46 @@ public sealed class DriverEngine : IMonitorEngine
 {
     public string Name => "Drivers";
 
-    private readonly Dictionary<string, string> _baseline = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _baseline =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public void Initialize()
     {
-        foreach (var d in EnumerateDrivers())
-            _baseline[d.Name] = d.PathAt;
+        if (!TryEnumerateDrivers(out var drivers)) return;
+        foreach (var driver in drivers)
+            _baseline[driver.Name] = driver.Path;
     }
 
     public IEnumerable<Alert> Scan()
     {
-        var current = EnumerateDrivers().ToDictionary(d => d.Name, d => d.PathAt, StringComparer.OrdinalIgnoreCase);
+        if (!TryEnumerateDrivers(out var drivers))
+            yield break;
 
-        // New drivers
+        var current = new Dictionary<string, string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var driver in drivers)
+            current[driver.Name] = driver.Path;
+
         foreach (var (name, path) in current)
         {
-            if (_baseline.ContainsKey(name)) continue;
-
-            yield return new Alert(
-                Timestamp: DateTime.Now,
-                Category:  "Driver",
-                Title:     "NEW DRIVER",
-                Message:   $"{name} ({path})",
-                Severity:  AlertSeverity.High,
-                Path:      path);
+            if (!_baseline.TryGetValue(name, out var previous))
+            {
+                yield return new Alert(
+                    DateTime.Now, "Driver", "NEW DRIVER",
+                    $"{name} ({path})", AlertSeverity.High, Path: path);
+            }
+            else if (!string.Equals(
+                         previous, path, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return new Alert(
+                    DateTime.Now, "Driver", "DRIVER PATH CHANGED",
+                    $"{name}: {previous} -> {path}",
+                    AlertSeverity.High, Path: path);
+            }
 
             _baseline[name] = path;
         }
 
-        // Removed drivers
         var removed = new List<string>();
         foreach (var name in _baseline.Keys)
             if (!current.ContainsKey(name))
@@ -51,51 +59,42 @@ public sealed class DriverEngine : IMonitorEngine
         foreach (var name in removed)
         {
             yield return new Alert(
-                Timestamp: DateTime.Now,
-                Category:  "Driver",
-                Title:     "DRIVER REMOVED",
-                Message:   name,
-                Severity:  AlertSeverity.Med);
+                DateTime.Now, "Driver", "DRIVER REMOVED",
+                name, AlertSeverity.Med);
             _baseline.Remove(name);
         }
     }
 
-    private readonly record struct DriverRecord(string Name, string PathAt);
-
-    private static List<DriverRecord> EnumerateDrivers()
+    private static bool TryEnumerateDrivers(out List<DriverRecord> records)
     {
-        // Win32_SystemDriver returns kernel-mode drivers (Service Type = 1 or 2)
-        // — same set Get-WmiObject Win32_SystemDriver returns in PowerShell.
-        //
-        // CRITICAL: the ManagementObjectCollection returned by searcher.Get()
-        // is tied to the lifetime of the searcher. Iterating it after the
-        // using block has disposed the searcher would crash with a COM
-        // access violation. Materialize the records into a List INSIDE the
-        // using block so the iterator finishes before the searcher is freed.
-        // Each ManagementObject is disposed in a finally so we never leak
-        // the underlying COM reference even if a property read throws.
-        var records = new List<DriverRecord>();
+        records = new List<DriverRecord>();
         try
         {
             using var searcher = new ManagementObjectSearcher(
                 "SELECT Name, PathName FROM Win32_SystemDriver");
             using var results = searcher.Get();
-            foreach (ManagementObject mo in results)
+            foreach (ManagementObject item in results)
             {
                 try
                 {
-                    string? name = mo["Name"]?.ToString();
-                    string? path = mo["PathName"]?.ToString();
-                    if (string.IsNullOrEmpty(name)) continue;
-                    records.Add(new DriverRecord(name!, path ?? ""));
+                    var name = item["Name"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    records.Add(new DriverRecord(
+                        name, item["PathName"]?.ToString() ?? string.Empty));
                 }
-                finally { mo.Dispose(); }
+                finally
+                {
+                    item.Dispose();
+                }
             }
+            return true;
         }
         catch
         {
-            // WMI failure — return whatever we already collected.
+            records.Clear();
+            return false;
         }
-        return records;
     }
+
+    private readonly record struct DriverRecord(string Name, string Path);
 }

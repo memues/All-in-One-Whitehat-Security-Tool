@@ -36,3 +36,13 @@ public interface IMonitorEngine
     /// </summary>
     IEnumerable<Alert> Scan();
 }
+
+/// <summary>
+/// Optional contract for engines whose background Scan suppresses duplicate
+/// alerts. On-demand scans use this to report findings that are present now,
+/// even when the background loop already raised them.
+/// </summary>
+public interface ICurrentStateScanner
+{
+    IEnumerable<Alert> ScanCurrent();
+}

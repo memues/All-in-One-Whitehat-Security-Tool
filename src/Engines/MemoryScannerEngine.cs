@@ -40,8 +40,7 @@ public sealed class MemoryScannerEngine : IMonitorEngine
         "powershell", "pwsh", "code", "Code", "devenv",
     };
 
-    /// <summary>PIDs we already alerted on (one alert per process per session).</summary>
-    private readonly HashSet<int> _alerted = new();
+    private readonly HashSet<ProcessIdentity> _alerted = new();
 
     /// <summary>
     /// Baseline RWX processes captured at Initialize. Anything in here
@@ -51,7 +50,7 @@ public sealed class MemoryScannerEngine : IMonitorEngine
     /// RuntimeBroker / etc., which is the v7.3.x bug the user reported as
     /// "I only see Memory alerts, the others do not work".
     /// </summary>
-    private readonly HashSet<int> _baselineRwx = new();
+    private readonly HashSet<ProcessIdentity> _baselineRwx = new();
 
     public void Initialize()
     {
@@ -69,10 +68,12 @@ public sealed class MemoryScannerEngine : IMonitorEngine
             {
                 if (p.Id <= 4) continue;
                 if (JitAllowlist.Contains(p.ProcessName)) continue;
+                if (UsesManagedRuntime(p)) continue;
+                if (!TryGetIdentity(p, out var identity)) continue;
                 try
                 {
                     if (TryGetSuspiciousRegion(p.Id, out _))
-                        _baselineRwx.Add(p.Id);
+                        _baselineRwx.Add(identity);
                 }
                 catch { /* probe failure on a single process is fine */ }
             }
@@ -93,18 +94,22 @@ public sealed class MemoryScannerEngine : IMonitorEngine
 
         try
         {
+            var live = new HashSet<ProcessIdentity>();
             foreach (var p in procs)
             {
                 if (p.Id <= 4) continue;
                 if (JitAllowlist.Contains(p.ProcessName)) continue;
-                if (_alerted.Contains(p.Id)) continue;
+                if (UsesManagedRuntime(p)) continue;
+                if (!TryGetIdentity(p, out var identity)) continue;
+                live.Add(identity);
+                if (_alerted.Contains(identity)) continue;
                 // Skip processes that already had RWX memory at startup —
                 // they are part of the baseline, not a new injection.
-                if (_baselineRwx.Contains(p.Id)) continue;
+                if (_baselineRwx.Contains(identity)) continue;
 
                 if (TryGetSuspiciousRegion(p.Id, out var region))
                 {
-                    _alerted.Add(p.Id);
+                    _alerted.Add(identity);
                     alerts.Add(new Alert(
                         Timestamp:   DateTime.Now,
                         Category:    "Memory",
@@ -115,6 +120,8 @@ public sealed class MemoryScannerEngine : IMonitorEngine
                         ProcessId:   p.Id));
                 }
             }
+            _alerted.IntersectWith(live);
+            _baselineRwx.IntersectWith(live);
         }
         finally
         {
@@ -155,8 +162,9 @@ public sealed class MemoryScannerEngine : IMonitorEngine
                 if ((mbi.State == NativeMethods.MEM_COMMIT)
                  && (mbi.Type  == NativeMethods.MEM_PRIVATE))
                 {
-                    bool rwx = mbi.Protect == NativeMethods.PAGE_EXECUTE_READWRITE
-                            || mbi.Protect == NativeMethods.PAGE_EXECUTE_WRITECOPY;
+                    var baseProtection = mbi.Protect & 0xFF;
+                    bool rwx = baseProtection == NativeMethods.PAGE_EXECUTE_READWRITE
+                            || baseProtection == NativeMethods.PAGE_EXECUTE_WRITECOPY;
                     if (rwx)
                     {
                         regionAddress = mbi.BaseAddress;
@@ -176,4 +184,42 @@ public sealed class MemoryScannerEngine : IMonitorEngine
 
         return false;
     }
+
+    private static bool TryGetIdentity(
+        Process process, out ProcessIdentity identity)
+    {
+        try
+        {
+            identity = new ProcessIdentity(
+                process.Id, process.StartTime.ToUniversalTime().Ticks);
+            return true;
+        }
+        catch
+        {
+            identity = default;
+            return false;
+        }
+    }
+
+    private static bool UsesManagedRuntime(Process process)
+    {
+        try
+        {
+            foreach (ProcessModule module in process.Modules)
+            {
+                var name = module.ModuleName;
+                if (name.Equals("coreclr.dll", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("clr.dll", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("mono-2.0-sgen.dll", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch
+        {
+            // Inaccessible module lists continue through the regular scan.
+        }
+        return false;
+    }
+
+    private readonly record struct ProcessIdentity(int Pid, long StartTicks);
 }

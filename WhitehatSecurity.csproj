@@ -7,9 +7,10 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <RootNamespace>WhitehatSecurity</RootNamespace>
     <AssemblyName>WhitehatSecurity</AssemblyName>
-    <Version>7.4.0.0</Version>
+    <Version>7.4.1.0</Version>
     <Company>Whitehat Security</Company>
     <Product>All-in-One Whitehat Security Tool</Product>
     <Description>Real-time Windows security monitoring tool — C# port</Description>
@@ -30,7 +31,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
     <PackageReference Include="System.Management" Version="8.0.0" />
+    <PackageReference Include="System.Diagnostics.EventLog" Version="8.0.0" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
   </ItemGroup>
 

@@ -32,6 +32,12 @@ public sealed class AlertThrottle
 
     public AlertThrottle(TimeSpan window, int allowedPerWindow)
     {
+        if (window <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(
+                nameof(window), "The window must be positive.");
+        if (allowedPerWindow <= 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(allowedPerWindow), "The limit must be positive.");
         Window           = window;
         AllowedPerWindow = allowedPerWindow;
     }

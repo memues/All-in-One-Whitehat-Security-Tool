@@ -18,6 +18,82 @@ namespace WhitehatSecurity.Core;
 
 public static class ElevationHelper
 {
+    internal static int CleanupManagedChanges(Logger? logger = null)
+    {
+        const string script = @"
+Get-NetFirewallRule -ErrorAction SilentlyContinue |
+    Where-Object DisplayName -like 'WHS_*' |
+    Remove-NetFirewallRule -ErrorAction Stop
+
+$hosts = ""$env:SystemRoot\System32\drivers\etc\hosts""
+if (Test-Path $hosts) {
+    $content = Get-Content $hosts -Raw
+    $pattern = '(?s)# WHS-BEGIN-(Trackers|Malware|Telemetry).*?# WHS-END-\1\r?\n?'
+    $content = [regex]::Replace($content, $pattern, '')
+    [System.IO.File]::WriteAllText($hosts, $content)
+}
+
+$dataDir = Join-Path $env:ProgramData 'Whitehat Security'
+$backup = Join-Path $dataDir 'dns-backup.json'
+if (Test-Path $backup) {
+    $saved = @(Get-Content $backup -Raw | ConvertFrom-Json)
+    foreach ($adapter in $saved) {
+        $addresses = @($adapter.ServerAddresses)
+        if ($addresses.Count -gt 0) {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $addresses
+        } else {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses
+        }
+    }
+    if (Get-Command Remove-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
+        '1.1.1.1','9.9.9.9','8.8.8.8','94.140.14.14' | ForEach-Object {
+            $address = $_
+            Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue |
+                Where-Object ServerAddress -eq $address |
+                Remove-DnsClientDohServerAddress -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+    Remove-Item $dataDir -Recurse -Force
+}";
+        return RunDirect(script, logger);
+    }
+
+    private static int RunDirect(string script, Logger? logger)
+    {
+        var tmpFile = Path.Combine(
+            Path.GetTempPath(), $"whs_cleanup_{Guid.NewGuid():N}.ps1");
+        try
+        {
+            File.WriteAllText(
+                tmpFile, "$ErrorActionPreference = 'Stop'\r\n" + script);
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments =
+                    $"-NoProfile -ExecutionPolicy Bypass -File \"{tmpFile}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+            if (process is null) return -1;
+            if (!process.WaitForExit(30_000))
+            {
+                try { process.Kill(); } catch { }
+                return -2;
+            }
+            return process.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            logger?.Warn($"Cleanup failed: {ex.Message}");
+            return -3;
+        }
+        finally
+        {
+            try { File.Delete(tmpFile); } catch { }
+        }
+    }
+
     /// <summary>
     /// Writes the given PowerShell snippet to a temp file, launches it
     /// elevated via UAC, waits up to 30 s for it to finish, and returns the
@@ -31,7 +107,9 @@ public static class ElevationHelper
 
         try
         {
-            File.WriteAllText(tmpFile, script);
+            File.WriteAllText(
+                tmpFile,
+                "$ErrorActionPreference = 'Stop'\r\n" + script);
 
             var psi = new ProcessStartInfo
             {
@@ -100,16 +178,16 @@ public static class ElevationHelper
     public static int SetBlockInboundRule(bool enabled, Logger? logger = null)
     {
         var script = enabled
-            ? "Set-NetFirewallProfile -Name Domain,Private,Public -DefaultInboundAction Block -ErrorAction Stop"
-            : "Set-NetFirewallProfile -Name Domain,Private,Public -DefaultInboundAction Allow -ErrorAction Stop";
+            ? "if (-not (Get-NetFirewallRule -DisplayName 'WHS_BlockAllInbound' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName 'WHS_BlockAllInbound' -Direction Inbound -Action Block -Profile Any | Out-Null }"
+            : "Get-NetFirewallRule -DisplayName 'WHS_BlockAllInbound' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop";
         return RunElevated(script, logger);
     }
 
     public static int SetBlockOutboundRule(bool enabled, Logger? logger = null)
     {
         var script = enabled
-            ? "Set-NetFirewallProfile -Name Domain,Private,Public -DefaultOutboundAction Block -ErrorAction Stop"
-            : "Set-NetFirewallProfile -Name Domain,Private,Public -DefaultOutboundAction Allow -ErrorAction Stop";
+            ? "if (-not (Get-NetFirewallRule -DisplayName 'WHS_BlockAllOutbound' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName 'WHS_BlockAllOutbound' -Direction Outbound -Action Block -Profile Any | Out-Null }"
+            : "Get-NetFirewallRule -DisplayName 'WHS_BlockAllOutbound' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop";
         return RunElevated(script, logger);
     }
 
@@ -194,19 +272,24 @@ for ($i = 0; $i -lt $names.Count; $i++) {
         var script = enabled
             ? @"
 $rules = @(
-    @{ Name='WHS_BlockDev_SMB_Out';    Dir='Outbound'; Proto='TCP'; Port='445' },
-    @{ Name='WHS_BlockDev_SMB_In';     Dir='Inbound';  Proto='TCP'; Port='445' },
-    @{ Name='WHS_BlockDev_NetBIOS_In'; Dir='Inbound';  Proto='TCP'; Port='139' },
-    @{ Name='WHS_BlockDev_LLMNR_Out';  Dir='Outbound'; Proto='UDP'; Port='5355' },
-    @{ Name='WHS_BlockDev_mDNS_Out';   Dir='Outbound'; Proto='UDP'; Port='5353' }
+    @{ Name='WHS_BlockDev_SMB_Out';      Dir='Outbound'; Proto='TCP'; Port='445';  Side='RemotePort' },
+    @{ Name='WHS_BlockDev_SMB_In';       Dir='Inbound';  Proto='TCP'; Port='445';  Side='LocalPort' },
+    @{ Name='WHS_BlockDev_NetBIOS_Out';  Dir='Outbound'; Proto='TCP'; Port='139';  Side='RemotePort' },
+    @{ Name='WHS_BlockDev_NetBIOS_In';   Dir='Inbound';  Proto='TCP'; Port='139';  Side='LocalPort' },
+    @{ Name='WHS_BlockDev_NetBIOSU_Out'; Dir='Outbound'; Proto='UDP'; Port='137-138'; Side='RemotePort' },
+    @{ Name='WHS_BlockDev_NetBIOSU_In';  Dir='Inbound';  Proto='UDP'; Port='137-138'; Side='LocalPort' },
+    @{ Name='WHS_BlockDev_LLMNR_Out';    Dir='Outbound'; Proto='UDP'; Port='5355'; Side='RemotePort' },
+    @{ Name='WHS_BlockDev_mDNS_Out';     Dir='Outbound'; Proto='UDP'; Port='5353'; Side='RemotePort' }
 )
 foreach ($r in $rules) {
     if (-not (Get-NetFirewallRule -DisplayName $r.Name -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName $r.Name -Direction $r.Dir -Action Block -Protocol $r.Proto -LocalPort $r.Port -Profile Any | Out-Null
+        $args = @{ DisplayName=$r.Name; Direction=$r.Dir; Action='Block'; Protocol=$r.Proto; Profile='Any' }
+        $args[$r.Side] = $r.Port
+        New-NetFirewallRule @args | Out-Null
     }
 }"
             : @"
-'WHS_BlockDev_SMB_Out','WHS_BlockDev_SMB_In','WHS_BlockDev_NetBIOS_In','WHS_BlockDev_LLMNR_Out','WHS_BlockDev_mDNS_Out' | ForEach-Object {
+'WHS_BlockDev_SMB_Out','WHS_BlockDev_SMB_In','WHS_BlockDev_NetBIOS_Out','WHS_BlockDev_NetBIOS_In','WHS_BlockDev_NetBIOSU_Out','WHS_BlockDev_NetBIOSU_In','WHS_BlockDev_LLMNR_Out','WHS_BlockDev_mDNS_Out' | ForEach-Object {
     Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 }";
         return RunElevated(script, logger);
@@ -264,18 +347,21 @@ if (Test-Path $hosts) {{
     /// </summary>
     public static int SetDnsBypassBlock(bool enabled, Logger? logger = null)
     {
-        var script = enabled
-            ? @"if (-not (Get-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -Direction Outbound -Action Block -Protocol UDP -RemotePort 53 -Profile Any | Out-Null
-}"
-            : "Get-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -ErrorAction SilentlyContinue | Remove-NetFirewallRule";
-        return RunElevated(script, logger);
+        if (enabled)
+        {
+            logger?.Warn(
+                "DNS bypass lock rejected: a blanket port-53 block also blocks the Windows DNS client.");
+            return -6;
+        }
+        return RunElevated(
+            "Get-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
+            logger);
     }
 
     /// <summary>
     /// Configure DNS-over-HTTPS for the active providers. Requires Windows 11
-    /// (the Set-DnsClientDohServerAddress cmdlet was added then). On older
-    /// Windows the script just no-ops without erroring.
+    /// DNS client cmdlets. Enabling reports an error on unsupported systems
+    /// instead of persisting a setting that was never applied.
     /// </summary>
     public static int SetDnsOverHttps(bool enabled, string provider, Logger? logger = null)
     {
@@ -289,33 +375,39 @@ if (Test-Path $hosts) {{
             _            => ("",               ""),
         };
 
-        if (!enabled || string.IsNullOrEmpty(v4Primary))
+        if (!enabled)
         {
-            // Best-effort: clear the DoH server entry. Set-DnsClientDohServerAddress
-            // -ServerAddress... -Clear is not a thing, so just remove via Remove-.
-            var clearScript = @"
-if (Get-Command Set-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
-    try { Get-DnsClientDohServerAddress | Remove-DnsClientDohServerAddress -Confirm:$false } catch {}
-}";
+            if (string.IsNullOrEmpty(v4Primary)) return 0;
+            var clearScript = $@"
+if (Get-Command Remove-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {{
+    Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue |
+        Where-Object ServerAddress -eq '{v4Primary}' |
+        Remove-DnsClientDohServerAddress -Confirm:$false -ErrorAction Stop
+}}";
             return RunElevated(clearScript, logger);
         }
+        if (string.IsNullOrEmpty(v4Primary)) return -5;
 
         var setScript = $@"
-if (Get-Command Set-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {{
-    try {{
-        Add-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction Stop
-    }} catch {{
-        Set-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue
-    }}
-    Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {{
-        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('{v4Primary}')
-    }}
+if (-not (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue)) {{
+    exit 6
+}}
+try {{
+    Add-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction Stop
+}} catch {{
+    Set-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction Stop
+}}
+Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {{
+    Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('{v4Primary}')
 }}";
         return RunElevated(setScript, logger);
     }
 
     public static int SetDnsProvider(string providerName, Logger? logger = null)
     {
+        var valid = providerName is "None" or "Cloudflare" or "Quad9"
+            or "Google" or "OpenDNS" or "AdGuard";
+        if (!valid) return -5;
         // providerName comes from the Settings dropdown — see DnsProvider.cs
         var (v4Primary, v4Secondary) = providerName switch
         {
@@ -330,12 +422,45 @@ if (Get-Command Set-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {{
         string script;
         if (string.IsNullOrEmpty(v4Primary))
         {
-            // Reset to DHCP
-            script = "Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }";
+            script = @"
+$backup = Join-Path $env:ProgramData 'Whitehat Security\dns-backup.json'
+if (Test-Path $backup) {
+    $saved = @(Get-Content $backup -Raw | ConvertFrom-Json)
+    foreach ($adapter in $saved) {
+        $addresses = @($adapter.ServerAddresses)
+        if ($addresses.Count -gt 0) {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $addresses
+        } else {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses
+        }
+    }
+    Remove-Item $backup -Force
+} else {
+    Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {
+        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses
+    }
+}";
         }
         else
         {
-            script = $"Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {{ Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('{v4Primary}','{v4Secondary}') }}";
+            script = $@"
+$backup = Join-Path $env:ProgramData 'Whitehat Security\dns-backup.json'
+if (-not (Test-Path $backup)) {{
+    $directory = Split-Path $backup -Parent
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $active = Get-NetAdapter | Where-Object Status -eq 'Up'
+    $saved = foreach ($adapter in $active) {{
+        $dns = Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4
+        [pscustomobject]@{{
+            InterfaceIndex = $adapter.ifIndex
+            ServerAddresses = @($dns.ServerAddresses)
+        }}
+    }}
+    @($saved) | ConvertTo-Json -Depth 4 | Set-Content -Path $backup -Encoding UTF8
+}}
+Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {{
+    Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('{v4Primary}','{v4Secondary}')
+}}";
         }
         return RunElevated(script, logger);
     }

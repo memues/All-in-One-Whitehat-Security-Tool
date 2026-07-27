@@ -6,6 +6,8 @@
 using System;
 using System.Runtime.InteropServices;
 
+[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+
 namespace WhitehatSecurity.Native;
 
 internal static class NativeMethods
