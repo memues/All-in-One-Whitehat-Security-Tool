@@ -267,6 +267,31 @@ Run("Upgrading a config cannot silently disable a detection", () =>
 
     Throws(() => NotifyConfig.LoadStrictJson(
         """{"SchemaVersion":99}"""));
+
+    // The migrated values must reach disk, or the file keeps claiming the
+    // detections are off and the next hand-edit brings the bug back.
+    var path = Path.Combine(
+        Path.GetTempPath(), $"whs-cfg-{Guid.NewGuid():N}.json");
+    try
+    {
+        File.WriteAllText(
+            path,
+            """{"SchemaVersion":1,"HiddenProcess":false,"Memory":false,"BYOVD":false}""");
+        var loaded = NotifyConfig.LoadOrCreate(path);
+        Equal(true, loaded.IsCategoryEnabled("BYOVD"));
+
+        var onDisk = NotifyConfig.LoadStrict(path);
+        Equal(NotifyConfig.CurrentSchemaVersion, onDisk.SchemaVersion);
+        Equal(true, onDisk.IsCategoryEnabled("HiddenProcess"));
+        Equal(true, onDisk.IsCategoryEnabled("Memory"));
+        Equal(true, onDisk.IsCategoryEnabled("BYOVD"));
+        // Already-current files must not be rewritten on every start.
+        Equal(false, onDisk.WasMigrated);
+    }
+    finally
+    {
+        try { File.Delete(path); } catch { }
+    }
 });
 
 Run("Alert history survives a restart", () =>

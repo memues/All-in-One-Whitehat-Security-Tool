@@ -35,6 +35,15 @@ public sealed class NotifyConfig
     /// </summary>
     public const int CurrentSchemaVersion = 2;
 
+    /// <summary>
+    /// True when loading had to upgrade the file. LoadOrCreate writes the
+    /// result back so the on-disk state matches what the program is running
+    /// — otherwise the file keeps claiming detections are off while they are
+    /// actually on, and the next hand-edit of that file resurrects the bug.
+    /// </summary>
+    [JsonIgnore]
+    public bool WasMigrated { get; private set; }
+
     // ---------------- Notification categories (10) ----------------
 
     [JsonPropertyName("Firmware")]   public bool Firmware   { get; set; }
@@ -210,7 +219,14 @@ public sealed class NotifyConfig
             try
             {
                 var raw = File.ReadAllText(path);
-                return LoadStrictJson(raw);
+                var loaded = LoadStrictJson(raw);
+                if (loaded.WasMigrated)
+                {
+                    // Best effort: running with the migrated values is what
+                    // matters, persisting them is a convenience.
+                    try { loaded.Save(path); } catch { }
+                }
+                return loaded;
             }
             catch
             {
@@ -268,6 +284,7 @@ public sealed class NotifyConfig
             loaded.Memory = true;
             loaded.BYOVD = true;
             loaded.SchemaVersion = CurrentSchemaVersion;
+            loaded.WasMigrated = true;
         }
         if (!DnsConfiguration.TryNormalizeProviderName(
                 loaded.DNS_Provider, out var provider))
