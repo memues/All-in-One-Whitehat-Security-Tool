@@ -61,7 +61,7 @@ public sealed partial class DashboardForm
         };
         var version = new Label
         {
-            Text      = "v7.4.2 Dashboard",
+            Text      = "v7.4.3 Dashboard",
             ForeColor = Theme.TextDim,
             Font      = new Font("Segoe UI", 8),
             AutoSize  = false,
@@ -836,7 +836,33 @@ public sealed partial class DashboardForm
         dnsCombo.SelectedIndexChanged += OnDnsProviderChanged;
         page.Controls.Add(dnsCombo);
         _dnsProviderCombo = dnsCombo;
-        y += 36;
+        var dnsApply = new Button
+        {
+            Text      = "Apply / Repair",
+            Location  = new Point(392, y + 3),
+            Size      = new Size(126, 28),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.AccentDim,
+            ForeColor = Theme.TextMain,
+            Font      = Theme.Body(9, FontStyle.Bold),
+            Cursor    = Cursors.Hand,
+        };
+        dnsApply.FlatAppearance.BorderSize = 0;
+        dnsApply.Click += OnApplyDnsClick;
+        page.Controls.Add(dnsApply);
+        _dnsApplyButton = dnsApply;
+
+        var dnsStatus = new Label
+        {
+            Text      = "Ready to apply and verify",
+            Location  = new Point(160, y + 35),
+            AutoSize  = true,
+            Font      = Theme.Body(8.5f),
+            ForeColor = Theme.TextDim,
+        };
+        page.Controls.Add(dnsStatus);
+        _dnsStatusLabel = dnsStatus;
+        y += 58;
 
         y = AddSettingCheckbox(page, "DNS_DoH", "Enable DNS over HTTPS", "Encrypt DNS queries (requires compatible provider)", _config.DNS_DoH, y);
         ApplyDnsControlState();

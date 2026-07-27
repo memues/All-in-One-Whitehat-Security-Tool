@@ -149,12 +149,25 @@ if (Test-Path $backup) {
     {
         string tmpFile = Path.Combine(Path.GetTempPath(),
             $"whs_elev_{Guid.NewGuid():N}.ps1");
+        string errorFile = Path.Combine(Path.GetTempPath(),
+            $"whs_elev_error_{Guid.NewGuid():N}.txt");
 
         try
         {
+            var quotedErrorFile = errorFile.Replace("'", "''");
+            var wrappedScript =
+                "$ErrorActionPreference = 'Stop'\r\n" +
+                "try {\r\n" +
+                script +
+                "\r\n} catch {\r\n" +
+                "    ($_ | Out-String) | Set-Content -LiteralPath '" +
+                quotedErrorFile +
+                "' -Encoding UTF8\r\n" +
+                "    exit 1\r\n" +
+                "}\r\n";
             File.WriteAllText(
                 tmpFile,
-                "$ErrorActionPreference = 'Stop'\r\n" + script);
+                wrappedScript);
 
             var psi = new ProcessStartInfo
             {
@@ -182,7 +195,17 @@ if (Test-Path $backup) {
 
             int code = proc.ExitCode;
             if (code != 0)
+            {
                 logger?.Warn($"Elevation: exit {code}");
+                if (File.Exists(errorFile))
+                {
+                    var detail = File.ReadAllText(errorFile).Trim();
+                    if (detail.Length > 2_000)
+                        detail = detail[..2_000] + "...";
+                    if (!string.IsNullOrWhiteSpace(detail))
+                        logger?.Warn($"Elevation detail: {detail}");
+                }
+            }
             return code;
         }
         catch (Exception ex)
@@ -194,6 +217,7 @@ if (Test-Path $backup) {
         finally
         {
             try { File.Delete(tmpFile); } catch { }
+            try { File.Delete(errorFile); } catch { }
         }
     }
 
@@ -427,103 +451,38 @@ if (Test-Path $hosts) {{
     /// </summary>
     public static int SetDnsOverHttps(bool enabled, string provider, Logger? logger = null)
     {
-        // DoH endpoints for the providers offered in the Settings dropdown
-        var (v4Primary, dohTemplate) = provider switch
-        {
-            "Cloudflare" => ("1.1.1.1",        "https://cloudflare-dns.com/dns-query"),
-            "Quad9"      => ("9.9.9.9",        "https://dns.quad9.net/dns-query"),
-            "Google"     => ("8.8.8.8",        "https://dns.google/dns-query"),
-            "AdGuard"    => ("94.140.14.14",   "https://dns.adguard.com/dns-query"),
-            _            => ("",               ""),
-        };
+        if (!DnsConfiguration.TryGetProvider(provider, out var definition)
+            || definition?.DohTemplate is null)
+            return enabled ? -5 : 0;
 
-        if (!enabled)
+        try
         {
-            if (string.IsNullOrEmpty(v4Primary)) return 0;
-            var clearScript = $@"
-if (Get-Command Remove-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {{
-    Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue |
-        Where-Object ServerAddress -eq '{v4Primary}' |
-        Remove-DnsClientDohServerAddress -Confirm:$false -ErrorAction Stop
-}}";
-            return RunElevated(clearScript, logger);
+            return RunElevated(
+                DnsConfiguration.BuildDohScript(enabled, provider),
+                logger);
         }
-        if (string.IsNullOrEmpty(v4Primary)) return -5;
-
-        var setScript = $@"
-if (-not (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue)) {{
-    exit 6
-}}
-try {{
-    Add-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction Stop
-}} catch {{
-    Set-DnsClientDohServerAddress -ServerAddress '{v4Primary}' -DohTemplate '{dohTemplate}' -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction Stop
-}}
-Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {{
-    Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('{v4Primary}')
-}}";
-        return RunElevated(setScript, logger);
+        catch (ArgumentOutOfRangeException)
+        {
+            return -5;
+        }
     }
 
     public static int SetDnsProvider(string providerName, Logger? logger = null)
     {
-        var valid = providerName is "None" or "Cloudflare" or "Quad9"
-            or "Google" or "OpenDNS" or "AdGuard";
-        if (!valid) return -5;
+        if (providerName != "None"
+            && !DnsConfiguration.TryGetProvider(
+                providerName, out _))
+            return -5;
         // providerName comes from the Settings dropdown — see DnsProvider.cs
-        var (v4Primary, v4Secondary) = providerName switch
+        try
         {
-            "Cloudflare" => ("1.1.1.1",       "1.0.0.1"),
-            "Quad9"      => ("9.9.9.9",       "149.112.112.112"),
-            "Google"     => ("8.8.8.8",       "8.8.4.4"),
-            "OpenDNS"    => ("208.67.222.222","208.67.220.220"),
-            "AdGuard"    => ("94.140.14.14",  "94.140.15.15"),
-            _            => ("",              ""),
-        };
-
-        string script;
-        if (string.IsNullOrEmpty(v4Primary))
+            return RunElevated(
+                DnsConfiguration.BuildProviderScript(providerName),
+                logger);
+        }
+        catch (ArgumentOutOfRangeException)
         {
-            script = @"
-$backup = Join-Path $env:ProgramData 'Whitehat Security\dns-backup.json'
-if (Test-Path $backup) {
-    $saved = @(Get-Content $backup -Raw | ConvertFrom-Json)
-    foreach ($adapter in $saved) {
-        $addresses = @($adapter.ServerAddresses)
-        if ($addresses.Count -gt 0) {
-            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $addresses
-        } else {
-            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses
+            return -5;
         }
-    }
-    Remove-Item $backup -Force
-} else {
-    Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {
-        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses
-    }
-}";
-        }
-        else
-        {
-            script = $@"
-$backup = Join-Path $env:ProgramData 'Whitehat Security\dns-backup.json'
-if (-not (Test-Path $backup)) {{
-    $directory = Split-Path $backup -Parent
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $active = Get-NetAdapter | Where-Object Status -eq 'Up'
-    $saved = foreach ($adapter in $active) {{
-        $dns = Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4
-        [pscustomobject]@{{
-            InterfaceIndex = $adapter.ifIndex
-            ServerAddresses = @($dns.ServerAddresses)
-        }}
-    }}
-    @($saved) | ConvertTo-Json -Depth 4 | Set-Content -Path $backup -Encoding UTF8
-}}
-Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {{
-    Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('{v4Primary}','{v4Secondary}')
-}}";
-        }
-        return RunElevated(script, logger);
     }
 }

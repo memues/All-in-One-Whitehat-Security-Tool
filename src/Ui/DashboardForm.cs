@@ -80,6 +80,8 @@ public sealed partial class DashboardForm : Form
     private readonly ListView _aiResultsList = new();
     private readonly Label    _aiStatusLabel = new();
     private ComboBox? _dnsProviderCombo;
+    private Button? _dnsApplyButton;
+    private Label? _dnsStatusLabel;
     private Alert? _selectedAlert;
     private readonly Dictionary<Alert, AlertActionState> _alertActionStates =
         new(ReferenceEqualityComparer.Instance);
@@ -1422,8 +1424,20 @@ public sealed partial class DashboardForm : Form
                 () => ElevationHelper.SetHostsBlocklist("Telemetry", cb.Checked, _logger)); break;
             case "PF_BlockDNSBypass": SetCheckedWithoutHandler(cb, false); break;
 
-            case "DNS_DoH": await TogglePrivilegedAsync(cb, () => _config.DNS_DoH = cb.Checked,
-                () => ElevationHelper.SetDnsOverHttps(cb.Checked, _config.DNS_Provider, _logger)); break;
+            case "DNS_DoH":
+                var dnsApplied = await TogglePrivilegedAsync(
+                    cb,
+                    () => _config.DNS_DoH = cb.Checked,
+                    () => ElevationHelper.SetDnsOverHttps(
+                        cb.Checked, _config.DNS_Provider, _logger));
+                SetDnsStatus(
+                    dnsApplied
+                        ? cb.Checked
+                            ? "Secure DNS applied and verified"
+                            : "Secure DNS disabled and verified"
+                        : "Secure DNS change failed",
+                    dnsApplied ? Theme.Green : Theme.Red);
+                break;
         }
 
         SaveConfigSafe();
@@ -1433,59 +1447,158 @@ public sealed partial class DashboardForm : Form
     {
         if (sender is not ComboBox cmb) return;
         var picked = cmb.SelectedItem?.ToString() ?? "None";
-        if (picked == _config.DNS_Provider) return;
+        await ApplyDnsProviderAsync(cmb, picked, force: false);
+    }
 
+    private async void OnApplyDnsClick(object? sender, EventArgs e)
+    {
+        if (_dnsProviderCombo is not ComboBox cmb) return;
+        var picked = cmb.SelectedItem?.ToString() ?? "None";
+        await ApplyDnsProviderAsync(cmb, picked, force: true);
+    }
+
+    private async Task ApplyDnsProviderAsync(
+        ComboBox cmb,
+        string picked,
+        bool force)
+    {
+        var previousProvider = _config.DNS_Provider;
+        if (!force && picked == previousProvider) return;
+
+        var hadDoh = _config.DNS_DoH;
+        var disabledPreviousDoh = false;
         cmb.Enabled = false;
-        int rc;
+        if (_dnsApplyButton is not null)
+            _dnsApplyButton.Enabled = false;
+        SetDnsStatus(
+            picked == "None"
+                ? "Restoring automatic DNS..."
+                : $"Applying {picked}...",
+            Theme.Orange);
+
+        int rc = 0;
         try
         {
+            if (hadDoh && picked != previousProvider)
+            {
+                rc = await Task.Run(() =>
+                    ElevationHelper.SetDnsOverHttps(
+                        false, previousProvider, _logger));
+                if (rc != 0)
+                {
+                    RevertDnsCombo(cmb, previousProvider);
+                    SetDnsStatus(
+                        "Could not disable the previous Secure DNS setting",
+                        Theme.Red);
+                    ShowDnsFailure(
+                        rc, "disable the previous Secure DNS setting");
+                    return;
+                }
+                disabledPreviousDoh = true;
+            }
+
             rc = await Task.Run(
                 () => ElevationHelper.SetDnsProvider(picked, _logger));
-        }
-        finally
-        {
-            if (!cmb.IsDisposed) cmb.Enabled = true;
-        }
-        if (rc == 0)
-        {
+            if (rc != 0)
+            {
+                if (disabledPreviousDoh)
+                {
+                    var restoreDohRc = await Task.Run(() =>
+                        ElevationHelper.SetDnsOverHttps(
+                            true, previousProvider, _logger));
+                    if (restoreDohRc != 0)
+                    {
+                        _config.DNS_DoH = false;
+                        SaveConfigSafe();
+                    }
+                }
+                RevertDnsCombo(cmb, previousProvider);
+                SetDnsStatus("DNS change failed; previous settings restored",
+                    Theme.Red);
+                ShowDnsFailure(rc, $"apply {picked}");
+                return;
+            }
+
             _config.DNS_Provider = picked;
-            if (picked is "None" or "OpenDNS")
-                _config.DNS_DoH = false;
-            SaveConfigSafe();
-            // If DoH was enabled, re-apply with the new provider's DoH endpoint.
+            _config.DNS_DoH =
+                hadDoh && picked is not ("None" or "OpenDNS");
+
             if (_config.DNS_DoH)
             {
                 var dohRc = await Task.Run(() =>
-                    ElevationHelper.SetDnsOverHttps(true, picked, _logger));
+                    ElevationHelper.SetDnsOverHttps(
+                        true, picked, _logger));
                 if (dohRc != 0)
                 {
                     _config.DNS_DoH = false;
                     SaveConfigSafe();
+                    SetDnsStatus(
+                        $"{picked} applied; Secure DNS failed",
+                        Theme.Orange);
                     MessageBox.Show(
-                        "The DNS provider was changed, but DNS-over-HTTPS could not be applied. " +
-                        "DoH has been turned off so the dashboard matches the system state.",
+                        "The DNS provider was applied and verified, but " +
+                        "DNS-over-HTTPS could not be enabled. Secure DNS " +
+                        "was turned off so the dashboard matches Windows.",
                         "Whitehat Security",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
+                    ApplyDnsControlState();
+                    return;
                 }
             }
+
+            SaveConfigSafe();
+            SetDnsStatus(
+                picked == "None"
+                    ? "Automatic DNS restored and verified"
+                    : _config.DNS_DoH
+                        ? $"{picked} + Secure DNS applied and verified"
+                        : $"{picked} applied and verified",
+                Theme.Green);
             ApplyDnsControlState();
         }
-        else
+        finally
         {
-            // Revert the dropdown to the previously-applied provider so the
-            // visible state matches what is actually configured on the system.
-            cmb.SelectedIndexChanged -= OnDnsProviderChanged;
-            cmb.SelectedItem = _config.DNS_Provider;
-            cmb.SelectedIndexChanged += OnDnsProviderChanged;
+            if (!cmb.IsDisposed) cmb.Enabled = true;
+            if (_dnsApplyButton is not null
+                && !_dnsApplyButton.IsDisposed)
+                _dnsApplyButton.Enabled = true;
         }
+    }
+
+    private void RevertDnsCombo(
+        ComboBox combo,
+        string provider)
+    {
+        combo.SelectedIndexChanged -= OnDnsProviderChanged;
+        combo.SelectedItem = provider;
+        combo.SelectedIndexChanged += OnDnsProviderChanged;
+    }
+
+    private void SetDnsStatus(string text, Color color)
+    {
+        if (_dnsStatusLabel is null || _dnsStatusLabel.IsDisposed)
+            return;
+        _dnsStatusLabel.Text = text;
+        _dnsStatusLabel.ForeColor = color;
+    }
+
+    private void ShowDnsFailure(int result, string action)
+    {
+        MessageBox.Show(
+            $"Could not {action}: {DescribeElevationFailure(result)}\n\n" +
+            "The system was rolled back when possible. See the Console " +
+            "or log for the exact Windows error.",
+            "Whitehat Security",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning);
     }
 
     /// <summary>
     /// Helper that runs a privileged action via UAC, then either persists the
     /// new value or reverts the checkbox state if elevation failed.
     /// </summary>
-    private async Task TogglePrivilegedAsync(
+    private async Task<bool> TogglePrivilegedAsync(
         CheckBox cb, Action persist, Func<int> action)
     {
         cb.Enabled = false;
@@ -1499,6 +1612,7 @@ public sealed partial class DashboardForm : Form
         {
             persist();
             SaveConfigSafe();
+            return true;
         }
         else
         {
@@ -1509,22 +1623,27 @@ public sealed partial class DashboardForm : Form
             // Surface the failure so the user understands why the toggle
             // bounced back. Previous versions reverted silently, which made
             // it look like the checkbox was simply broken.
-            string reason = rc switch
-            {
-                -2 => "the elevated PowerShell timed out (30 s limit).",
-                -3 => "the elevation request failed (UAC declined or system error).",
-                -4 => "the input value was empty or invalid.",
-                -5 => "the input value was rejected as unsafe.",
-                -6 => "this operation is disabled because it could also block the Windows DNS client.",
-                6  => "DNS-over-HTTPS is not supported by this Windows installation.",
-                _  => $"the elevated script exited with code {rc}.",
-            };
             MessageBox.Show(
-                $"Could not apply '{cb.Tag}': {reason}\n\nThe checkbox has been reverted.",
+                $"Could not apply '{cb.Tag}': " +
+                $"{DescribeElevationFailure(rc)}\n\n" +
+                "The checkbox has been reverted.",
                 "Whitehat Security",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
     }
+
+    private static string DescribeElevationFailure(int result) =>
+        result switch
+        {
+            -2 => "the elevated PowerShell timed out (30 s limit).",
+            -3 => "the elevation request failed (UAC declined or system error).",
+            -4 => "the input value was empty or invalid.",
+            -5 => "the input value was rejected as unsafe.",
+            -6 => "this operation is disabled because it could also block the Windows DNS client.",
+            6  => "DNS-over-HTTPS is not supported by this Windows installation.",
+            _  => $"the elevated script exited with code {result}.",
+        };
 
     private void SetCheckedWithoutHandler(CheckBox cb, bool value)
     {

@@ -5,6 +5,7 @@ using WhitehatSecurity.Engines;
 using WhitehatSecurity.Native;
 using WhitehatSecurity.Ui;
 using Microsoft.Win32;
+using System.Diagnostics;
 using System.Reflection;
 using System.Windows.Forms;
 
@@ -55,6 +56,63 @@ Run("NotifyConfig strict loader validates DNS provider", () =>
     {
         File.Delete(path);
     }
+});
+
+Run("DNS provider catalog preserves both resolver addresses", () =>
+{
+    Equal(
+        true,
+        DnsConfiguration.TryGetProvider(
+            "Google", out var google));
+    Equal("8.8.8.8", google?.PrimaryIpv4);
+    Equal("8.8.4.4", google?.SecondaryIpv4);
+    Equal(
+        "https://dns.google/dns-query",
+        google?.DohTemplate);
+    Equal(
+        false,
+        DnsConfiguration.TryGetProvider(
+            "NotAProvider", out _));
+});
+
+Run("DNS scripts target routed adapters and roll back failures", () =>
+{
+    var apply = DnsConfiguration.BuildProviderScript("Google");
+    Contains(
+        "Get-NetRoute -AddressFamily IPv4", apply);
+    Contains(
+        "Restore-WhsDnsSnapshot -Snapshot $beforeApply", apply);
+    Contains(
+        "-ServerAddresses @('8.8.8.8','8.8.4.4')", apply);
+    DoesNotContain(
+        "Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object",
+        apply);
+
+    var reset = DnsConfiguration.BuildProviderScript("None");
+    Contains("-ResetServerAddresses", reset);
+    Contains("Assert-WhsDnsAutomatic", reset);
+
+    AssertPowerShellParses(apply);
+    AssertPowerShellParses(reset);
+});
+
+Run("Secure DNS configures both resolvers without destructive disable", () =>
+{
+    var enable = DnsConfiguration.BuildDohScript(
+        true, "Cloudflare");
+    Contains(
+        "$addresses = @('1.1.1.1','1.0.0.1')", enable);
+    Contains("-AutoUpgrade $true", enable);
+    Contains("DoH verification failed", enable);
+
+    var disable = DnsConfiguration.BuildDohScript(
+        false, "Cloudflare");
+    Contains("-AutoUpgrade $false", disable);
+    DoesNotContain(
+        "Remove-DnsClientDohServerAddress", disable);
+
+    AssertPowerShellParses(enable);
+    AssertPowerShellParses(disable);
 });
 
 Run("Catalog-signed Windows executables are trusted", () =>
@@ -347,6 +405,19 @@ Run("Alerts response controls fit the minimum dashboard size", () =>
             Equal("Undo Registry Change", remediate.Text);
             AssertInside(detail, regedit);
             AssertInside(detail, remediate);
+
+            InvokePrivate(form, "ShowPage", "Settings");
+            Application.DoEvents();
+            var pages =
+                GetPrivateField<Dictionary<string, Panel>>(
+                    form, "_navPages");
+            var dnsApply = GetPrivateField<Button>(
+                form, "_dnsApplyButton");
+            var dnsStatus = GetPrivateField<Label>(
+                form, "_dnsStatusLabel");
+            Equal("Apply / Repair", dnsApply.Text);
+            AssertFitsWidth(pages["Settings"], dnsApply);
+            AssertFitsWidth(pages["Settings"], dnsStatus);
         }
         finally
         {
@@ -430,6 +501,66 @@ static void Throws(Action action)
     throw new InvalidOperationException("Expected an exception.");
 }
 
+static void Contains(string expected, string actual)
+{
+    if (!actual.Contains(expected, StringComparison.Ordinal))
+        throw new InvalidOperationException(
+            $"Expected script to contain '{expected}'.");
+}
+
+static void DoesNotContain(string unexpected, string actual)
+{
+    if (actual.Contains(unexpected, StringComparison.Ordinal))
+        throw new InvalidOperationException(
+            $"Script unexpectedly contains '{unexpected}'.");
+}
+
+static void AssertPowerShellParses(string script)
+{
+    var path = Path.Combine(
+        Path.GetTempPath(),
+        $"whs-dns-script-{Guid.NewGuid():N}.ps1");
+    try
+    {
+        File.WriteAllText(path, script);
+        var quotedPath = path.Replace("'", "''");
+        var command =
+            "$path='" + quotedPath + "';" +
+            "$tokens=$null;$errors=$null;" +
+            "[System.Management.Automation.Language.Parser]::" +
+            "ParseFile($path,[ref]$tokens,[ref]$errors)|Out-Null;" +
+            "if($errors.Count){$errors|ForEach-Object{" +
+            "[Console]::Error.WriteLine($_.Message)};exit 1}";
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            ArgumentList =
+            {
+                "-NoProfile",
+                "-Command",
+                command,
+            },
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException(
+            "Could not start the PowerShell parser.");
+        if (!process.WaitForExit(10_000))
+        {
+            try { process.Kill(); } catch { }
+            throw new TimeoutException(
+                "PowerShell syntax check timed out.");
+        }
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException(
+                process.StandardError.ReadToEnd());
+    }
+    finally
+    {
+        try { File.Delete(path); } catch { }
+    }
+}
+
 static void RunSta(Action action)
 {
     Exception? failure = null;
@@ -481,5 +612,13 @@ static void AssertInside(Control parent, Control child)
         || child.Bottom > parent.ClientSize.Height)
         throw new InvalidOperationException(
             $"{child.Name}/{child.Text} is outside its parent: " +
+            $"child={child.Bounds}, parent={parent.ClientSize}.");
+}
+
+static void AssertFitsWidth(Control parent, Control child)
+{
+    if (child.Left < 0 || child.Right > parent.ClientSize.Width)
+        throw new InvalidOperationException(
+            $"{child.Name}/{child.Text} exceeds its parent width: " +
             $"child={child.Bounds}, parent={parent.ClientSize}.");
 }

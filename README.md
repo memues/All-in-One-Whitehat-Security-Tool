@@ -77,6 +77,7 @@ CLI flags:
     │   ├── QuarantineManager.cs   # recoverable file quarantine
     │   ├── RegistryRollbackService.cs # typed, conflict-safe registry rollback
     │   ├── ServiceRemediationService.cs # stop/disable + persistent restore state
+    │   ├── DnsConfiguration.cs  # transactional DNS / DoH apply and rollback
     │   └── MonitorHost.cs        # background loop runner
     ├── Engines/
     │   ├── IMonitorEngine.cs     # engine contract
@@ -144,8 +145,8 @@ CLI flags:
 | Alert detail toggle (`ShowThreatDetails`)            | ✓ |
 | 3 firewall profile toggles + 5 firewall block rules  | ✓ |
 | Hosts-based blocklists (Trackers / Malware / Telemetry) | ✓ |
-| DNS provider switching with revert-on-failure        | ✓ |
-| DNS-over-HTTPS (Windows 11)                          | ✓ |
+| Routed-adapter DNS switching with verification, repair, and transactional rollback | ✓ |
+| DNS-over-HTTPS for both provider resolvers (Windows 11) | ✓ |
 | DNS-bypass lock                                      | Disabled — the legacy blanket port-53 rule also blocked the Windows DNS client |
 | ETW provider listener                                | TODO |
 | WinRT toast (vs legacy balloons)                     | TODO |
