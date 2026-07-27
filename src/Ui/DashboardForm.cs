@@ -1541,9 +1541,10 @@ public sealed partial class DashboardForm : Form
             SetDnsStatus(
                 picked == "None"
                     ? "Automatic DNS restored and verified"
-                    : _config.DNS_DoH
+                    : (_config.DNS_DoH
                         ? $"{picked} + Secure DNS applied and verified"
-                        : $"{picked} applied and verified",
+                        : $"{picked} applied and verified")
+                      + DescribeIpv6Coverage(picked),
                 Theme.Green);
             ApplyDnsControlState();
         }
@@ -1563,6 +1564,22 @@ public sealed partial class DashboardForm : Form
         combo.SelectedIndexChanged -= OnDnsProviderChanged;
         combo.SelectedItem = provider;
         combo.SelectedIndexChanged += OnDnsProviderChanged;
+    }
+
+    /// <summary>
+    /// The apply script configures the provider's IPv6 resolvers only on
+    /// interfaces that hold an IPv6 default route. Without this note a user
+    /// on an IPv4-only network sees "applied and verified" and then finds
+    /// IPv6 DNS unchanged, with nothing explaining why.
+    /// </summary>
+    private static string DescribeIpv6Coverage(string providerName)
+    {
+        if (!DnsConfiguration.TryGetProvider(providerName, out var provider)
+            || provider is null)
+            return string.Empty;
+        return DnsConfiguration.IsProviderIpv6Active(provider)
+            ? " (IPv4 + IPv6)"
+            : " (IPv4 only — this network has no IPv6 route)";
     }
 
     private void SetDnsStatus(string text, Color color)

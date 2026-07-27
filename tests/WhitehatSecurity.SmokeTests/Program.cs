@@ -66,6 +66,8 @@ Run("DNS provider catalog preserves both resolver addresses", () =>
             "Google", out var google));
     Equal("8.8.8.8", google?.PrimaryIpv4);
     Equal("8.8.4.4", google?.SecondaryIpv4);
+    Equal("2001:4860:4860::8888", google?.PrimaryIpv6);
+    Equal("2001:4860:4860::8844", google?.SecondaryIpv6);
     Equal(
         "https://dns.google/dns-query",
         google?.DohTemplate);
@@ -73,6 +75,22 @@ Run("DNS provider catalog preserves both resolver addresses", () =>
         false,
         DnsConfiguration.TryGetProvider(
             "NotAProvider", out _));
+
+    // Every provider must carry a complete, parseable set of four
+    // resolvers; a missing IPv6 pair would silently configure one family.
+    foreach (var name in DnsConfiguration.ProviderNames)
+    {
+        if (name == "None") continue;
+        DnsConfiguration.TryGetProvider(name, out var p);
+        foreach (var v4 in p!.Ipv4Addresses)
+            Equal(
+                System.Net.Sockets.AddressFamily.InterNetwork,
+                System.Net.IPAddress.Parse(v4).AddressFamily);
+        foreach (var v6 in p.Ipv6Addresses)
+            Equal(
+                System.Net.Sockets.AddressFamily.InterNetworkV6,
+                System.Net.IPAddress.Parse(v6).AddressFamily);
+    }
 });
 
 Run("DNS scripts target routed adapters and roll back failures", () =>
@@ -82,8 +100,12 @@ Run("DNS scripts target routed adapters and roll back failures", () =>
         "Get-NetRoute -AddressFamily IPv4", apply);
     Contains(
         "Restore-WhsDnsSnapshot -Snapshot $beforeApply", apply);
-    Contains(
-        "-ServerAddresses @('8.8.8.8','8.8.4.4')", apply);
+    // Both resolvers of a family always go in together, and whatever was
+    // applied is what gets verified — a provider must never end up with
+    // only its primary configured.
+    Contains("$addresses = @('8.8.8.8','8.8.4.4')", apply);
+    Contains("-ServerAddresses $addresses", apply);
+    Contains("Assert-WhsDnsAddresses -InterfaceIndex $index", apply);
     DoesNotContain(
         "Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object",
         apply);
@@ -148,6 +170,46 @@ Run("Secure DNS switches the adapter, not just the server catalogue", () =>
     AssertPowerShellParses(disable);
     AssertPowerShellParses(provider);
     AssertPowerShellParses(reset);
+});
+
+Run("DNS and Secure DNS cover IPv6 where IPv6 actually routes", () =>
+{
+    var apply = DnsConfiguration.BuildProviderScript("Cloudflare");
+    Contains("2606:4700:4700::1111", apply);
+    Contains("2606:4700:4700::1001", apply);
+    // Applied only on interfaces holding an IPv6 default route. A machine
+    // can carry router-advertised global addresses with no IPv6 path out;
+    // pointing DNS at unreachable resolvers there stalls every lookup.
+    Contains("Get-WhsDnsIpv6Targets", apply);
+    Contains("-DestinationPrefix '::/0'", apply);
+    Contains("-AddressFamily IPv6", apply);
+
+    var enable = DnsConfiguration.BuildDohScript(true, "Cloudflare");
+    Contains("$addresses6 = @('2606:4700:4700::1111','2606:4700:4700::1001')",
+        enable);
+    // IPv6 DoH lives under Doh6, not Doh.
+    Contains(@"'Doh6'", enable);
+    Contains("-AddressFamily IPv6", enable);
+
+    // Both families roll back together, and the snapshot has to record the
+    // IPv6 family or a failed apply would restore only half the state.
+    Contains("AutomaticV6", apply);
+    Contains("ServerAddressesV6", apply);
+
+    var reset = DnsConfiguration.BuildProviderScript("None");
+    Contains("AutomaticV6", reset);
+
+    // The uninstall sweep needs every managed resolver, both families.
+    var managed = DnsConfiguration.ManagedDohAddresses;
+    Equal(true, managed.Contains("2606:4700:4700::1111"));
+    Equal(true, managed.Contains("2620:fe::9"));
+    Equal(true, managed.Contains("2001:4860:4860::8844"));
+    Equal(true, managed.Contains("2a10:50c0::ad2:ff"));
+    // OpenDNS has no managed DoH template, so neither family is listed.
+    Equal(false, managed.Contains("2620:119:35::35"));
+
+    AssertPowerShellParses(apply);
+    AssertPowerShellParses(enable);
 });
 
 Run("DNS provider names come from a single catalog", () =>

@@ -7,15 +7,21 @@ using System.Linq;
 namespace WhitehatSecurity.Core;
 
 /// <summary>
-/// A DNS provider offered by the dashboard. Both IPv4 addresses are kept
-/// together so provider switching and DNS-over-HTTPS cannot accidentally
-/// configure only the primary resolver.
+/// A DNS provider offered by the dashboard. All four resolver addresses are
+/// kept together so provider switching and DNS-over-HTTPS cannot accidentally
+/// configure only the primary resolver, or only one address family.
 /// </summary>
 public sealed record DnsProviderDefinition(
     string Name,
     string PrimaryIpv4,
     string SecondaryIpv4,
-    string? DohTemplate);
+    string PrimaryIpv6,
+    string SecondaryIpv6,
+    string? DohTemplate)
+{
+    public string[] Ipv4Addresses => new[] { PrimaryIpv4, SecondaryIpv4 };
+    public string[] Ipv6Addresses => new[] { PrimaryIpv6, SecondaryIpv6 };
+}
 
 /// <summary>
 /// Builds the privileged PowerShell used for DNS changes. Keeping the script
@@ -40,13 +46,18 @@ public static class DnsConfiguration
     private static readonly DnsProviderDefinition[] ProviderList =
     {
         new("Cloudflare", "1.1.1.1", "1.0.0.1",
+            "2606:4700:4700::1111", "2606:4700:4700::1001",
             "https://cloudflare-dns.com/dns-query"),
         new("Quad9", "9.9.9.9", "149.112.112.112",
+            "2620:fe::fe", "2620:fe::9",
             "https://dns.quad9.net/dns-query"),
         new("Google", "8.8.8.8", "8.8.4.4",
+            "2001:4860:4860::8888", "2001:4860:4860::8844",
             "https://dns.google/dns-query"),
-        new("OpenDNS", "208.67.222.222", "208.67.220.220", null),
+        new("OpenDNS", "208.67.222.222", "208.67.220.220",
+            "2620:119:35::35", "2620:119:53::53", null),
         new("AdGuard", "94.140.14.14", "94.140.15.15",
+            "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff",
             "https://dns.adguard.com/dns-query"),
     };
 
@@ -74,8 +85,8 @@ public static class DnsConfiguration
     public static IReadOnlyList<string> ManagedDohAddresses { get; } =
         ProviderList
             .Where(p => p.DohTemplate is not null)
-            .SelectMany(p => new[] { p.PrimaryIpv4, p.SecondaryIpv4 })
-            .Distinct(StringComparer.Ordinal)
+            .SelectMany(p => p.Ipv4Addresses.Concat(p.Ipv6Addresses))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
     public static bool TryGetProvider(
@@ -124,6 +135,40 @@ public static class DnsConfiguration
         TryGetProvider(providerName, out var provider)
         && provider?.DohTemplate is not null;
 
+    /// <summary>
+    /// True when one of the provider's IPv6 resolvers is actually configured
+    /// on a live interface. The apply script deliberately skips IPv6 on
+    /// machines with no IPv6 default route, so the dashboard uses this to say
+    /// so instead of leaving the user wondering why only IPv4 changed.
+    /// </summary>
+    public static bool IsProviderIpv6Active(DnsProviderDefinition provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        try
+        {
+            foreach (var nic in System.Net.NetworkInformation
+                         .NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus
+                    != System.Net.NetworkInformation.OperationalStatus.Up)
+                    continue;
+                foreach (var dns in nic.GetIPProperties().DnsAddresses)
+                {
+                    if (dns.AddressFamily
+                        != System.Net.Sockets.AddressFamily.InterNetworkV6)
+                        continue;
+                    foreach (var candidate in provider.Ipv6Addresses)
+                        if (System.Net.IPAddress.TryParse(
+                                candidate, out var parsed)
+                            && parsed.Equals(dns))
+                            return true;
+                }
+            }
+        }
+        catch { /* reporting only — never fail an apply over this */ }
+        return false;
+    }
+
     public static string BuildProviderScript(string providerName)
     {
         if (string.Equals(
@@ -139,6 +184,8 @@ public static class DnsConfiguration
 
         return CommonPowerShell
             + ApplyProviderPowerShell
+                .Replace("__PRIMARY6__", provider.PrimaryIpv6)
+                .Replace("__SECONDARY6__", provider.SecondaryIpv6)
                 .Replace("__PRIMARY__", provider.PrimaryIpv4)
                 .Replace("__SECONDARY__", provider.SecondaryIpv4);
     }
@@ -158,6 +205,8 @@ public static class DnsConfiguration
             : DisableDohPowerShell;
         return CommonPowerShell
             + template
+                .Replace("__PRIMARY6__", provider.PrimaryIpv6)
+                .Replace("__SECONDARY6__", provider.SecondaryIpv6)
                 .Replace("__PRIMARY__", provider.PrimaryIpv4)
                 .Replace("__SECONDARY__", provider.SecondaryIpv4)
                 .Replace("__DOH_TEMPLATE__", provider.DohTemplate);
@@ -192,28 +241,56 @@ function Get-WhsDnsTargetIndices {
     return @($indices)
 }
 
+# Interfaces that carry a live IPv6 default route. A machine can hold
+# router-advertised global IPv6 addresses and still have no IPv6 path to the
+# internet; pointing DNS at public IPv6 resolvers there makes every lookup
+# wait out a timeout before falling back to IPv4. So IPv6 resolvers are only
+# configured where IPv6 actually routes.
+function Get-WhsDnsIpv6Targets {
+    param([int[]] $InterfaceIndices)
+    $routed = @(Get-NetRoute -AddressFamily IPv6 `
+            -DestinationPrefix '::/0' -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty InterfaceIndex -Unique)
+    return @($InterfaceIndices |
+        Where-Object { $routed -contains [int]$_ })
+}
+
+function Test-WhsDnsFamilyAutomatic {
+    param([string] $InterfaceGuid, [string] $Family)
+    $service = if ($Family -eq 'IPv6') { 'Tcpip6' } else { 'Tcpip' }
+    $registryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\' + $service + '\Parameters\Interfaces\' + $InterfaceGuid
+    $configured = ''
+    try {
+        $configured = [string](Get-ItemPropertyValue `
+            -LiteralPath $registryPath -Name NameServer `
+            -ErrorAction Stop)
+    } catch {
+        $configured = ''
+    }
+    return [string]::IsNullOrWhiteSpace($configured)
+}
+
 function Get-WhsDnsSnapshot {
     param([int[]] $InterfaceIndices)
     foreach ($index in $InterfaceIndices) {
         $adapter = Get-NetAdapter -InterfaceIndex $index `
             -ErrorAction Stop
-        $registryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\' + $adapter.InterfaceGuid
-        $configured = ''
-        try {
-            $configured = [string](Get-ItemPropertyValue `
-                -LiteralPath $registryPath -Name NameServer `
-                -ErrorAction Stop)
-        } catch {
-            $configured = ''
-        }
-        $dns = Get-DnsClientServerAddress `
+        $dns4 = Get-DnsClientServerAddress `
             -InterfaceIndex $index -AddressFamily IPv4 `
             -ErrorAction Stop
+        $dns6 = Get-DnsClientServerAddress `
+            -InterfaceIndex $index -AddressFamily IPv6 `
+            -ErrorAction SilentlyContinue
         [pscustomobject]@{
             InterfaceIndex = [int]$index
             InterfaceAlias = [string]$adapter.Name
-            Automatic = [string]::IsNullOrWhiteSpace($configured)
-            ServerAddresses = @($dns.ServerAddresses)
+            Automatic = Test-WhsDnsFamilyAutomatic `
+                -InterfaceGuid $adapter.InterfaceGuid -Family 'IPv4'
+            ServerAddresses = @($dns4.ServerAddresses)
+            AutomaticV6 = Test-WhsDnsFamilyAutomatic `
+                -InterfaceGuid $adapter.InterfaceGuid -Family 'IPv6'
+            ServerAddressesV6 = @(
+                if ($null -ne $dns6) { $dns6.ServerAddresses } else { @() })
         }
     }
 }
@@ -225,26 +302,43 @@ function Restore-WhsDnsSnapshot {
             -InterfaceIndex ([int]$item.InterfaceIndex) `
             -ErrorAction SilentlyContinue
         if ($null -eq $adapter) { continue }
-        if ([bool]$item.Automatic) {
-            Set-DnsClientServerAddress `
-                -InterfaceIndex ([int]$item.InterfaceIndex) `
-                -ResetServerAddresses -ErrorAction Stop
-        } else {
+
+        # Set-DnsClientServerAddress has no -AddressFamily switch, so
+        # -ResetServerAddresses always clears BOTH families. Reset first,
+        # then re-apply whichever families were statically configured.
+        Set-DnsClientServerAddress `
+            -InterfaceIndex ([int]$item.InterfaceIndex) `
+            -ResetServerAddresses -ErrorAction Stop
+
+        $restore = @()
+        if (-not [bool]$item.Automatic) {
             $addresses = @($item.ServerAddresses)
             if ($addresses.Count -eq 0) {
                 throw "Saved DNS configuration for interface $($item.InterfaceIndex) is empty."
             }
+            $restore += $addresses
+        }
+        # AutomaticV6 is absent in backups written before v7.4.7; treating a
+        # missing value as "automatic" keeps those files usable.
+        if ($null -ne $item.PSObject.Properties['AutomaticV6'] -and
+            -not [bool]$item.AutomaticV6) {
+            $restore += @($item.ServerAddressesV6)
+        }
+        if ($restore.Count -gt 0) {
             Set-DnsClientServerAddress `
                 -InterfaceIndex ([int]$item.InterfaceIndex) `
-                -ServerAddresses $addresses -ErrorAction Stop
+                -ServerAddresses $restore -ErrorAction Stop
         }
     }
 }
 
 function Assert-WhsDnsAddresses {
-    param([int] $InterfaceIndex, [string[]] $Expected)
+    param(
+        [int] $InterfaceIndex,
+        [string[]] $Expected,
+        [string] $AddressFamily = 'IPv4')
     $actual = @((Get-DnsClientServerAddress `
-        -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 `
+        -InterfaceIndex $InterfaceIndex -AddressFamily $AddressFamily `
         -ErrorAction Stop).ServerAddresses)
     if ($actual.Count -ne $Expected.Count) {
         throw "DNS verification failed on interface $InterfaceIndex."
@@ -269,20 +363,24 @@ function Assert-WhsDnsAddresses {
 # Windows itself writes for an automatic template and the only one verified
 # here end to end. Fallback stays enabled on purpose — an unreachable DoH
 # endpoint must not take name resolution down with it.
+# IPv4 entries live under ...\DohInterfaceSettings\Doh, IPv6 under \Doh6.
 function Get-WhsDohInterfacePath {
-    param([int] $InterfaceIndex)
+    param([int] $InterfaceIndex, [string] $AddressFamily = 'IPv4')
     $adapter = Get-NetAdapter -InterfaceIndex $InterfaceIndex `
         -ErrorAction Stop
-    return 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' + $adapter.InterfaceGuid + '\DohInterfaceSettings\Doh'
+    $leaf = if ($AddressFamily -eq 'IPv6') { 'Doh6' } else { 'Doh' }
+    return 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' + $adapter.InterfaceGuid + '\DohInterfaceSettings\' + $leaf
 }
 
 function Set-WhsDohInterface {
     param(
         [int[]] $InterfaceIndices,
         [string[]] $Addresses,
-        [string] $Template)
+        [string] $Template,
+        [string] $AddressFamily = 'IPv4')
     foreach ($index in $InterfaceIndices) {
-        $path = Get-WhsDohInterfacePath -InterfaceIndex $index
+        $path = Get-WhsDohInterfacePath -InterfaceIndex $index `
+            -AddressFamily $AddressFamily
         New-Item -Path $path -Force -ErrorAction Stop | Out-Null
         # Entries for resolvers we are no longer configuring have to go, or
         # switching provider leaves the previous provider's addresses behind
@@ -302,13 +400,19 @@ function Set-WhsDohInterface {
     }
 }
 
+# Clears both families. Leaving Doh6 behind after switching to an IPv4-only
+# state would keep Windows offering the old provider's IPv6 resolvers.
 function Remove-WhsDohInterface {
     param([int[]] $InterfaceIndices)
     foreach ($index in $InterfaceIndices) {
-        $path = Get-WhsDohInterfacePath -InterfaceIndex $index
-        if (Test-Path -LiteralPath $path) {
-            Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue |
-                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($family in @('IPv4', 'IPv6')) {
+            $path = Get-WhsDohInterfacePath -InterfaceIndex $index `
+                -AddressFamily $family
+            if (Test-Path -LiteralPath $path) {
+                Get-ChildItem -LiteralPath $path `
+                        -ErrorAction SilentlyContinue |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
@@ -317,8 +421,10 @@ function Assert-WhsDohInterface {
     param(
         [int] $InterfaceIndex,
         [string[]] $Expected,
-        [string] $Template)
-    $path = Get-WhsDohInterfacePath -InterfaceIndex $InterfaceIndex
+        [string] $Template,
+        [string] $AddressFamily = 'IPv4')
+    $path = Get-WhsDohInterfacePath -InterfaceIndex $InterfaceIndex `
+        -AddressFamily $AddressFamily
     $names = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty PSChildName)
     foreach ($address in $Expected) {
@@ -344,29 +450,27 @@ function Assert-WhsDohInterface {
 
 function Assert-WhsDohInterfaceCleared {
     param([int] $InterfaceIndex)
-    $path = Get-WhsDohInterfacePath -InterfaceIndex $InterfaceIndex
-    $names = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty PSChildName)
-    if ($names.Count -gt 0) {
-        throw "Encrypted DNS is still configured on interface $InterfaceIndex."
+    foreach ($family in @('IPv4', 'IPv6')) {
+        $path = Get-WhsDohInterfacePath -InterfaceIndex $InterfaceIndex `
+            -AddressFamily $family
+        $names = @(Get-ChildItem -LiteralPath $path `
+                -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty PSChildName)
+        if ($names.Count -gt 0) {
+            throw "Encrypted DNS is still configured on interface $InterfaceIndex."
+        }
     }
 }
 
 function Assert-WhsDnsAutomatic {
-    param([int] $InterfaceIndex)
+    param([int] $InterfaceIndex, [string[]] $Families = @('IPv4','IPv6'))
     $adapter = Get-NetAdapter -InterfaceIndex $InterfaceIndex `
         -ErrorAction Stop
-    $registryPath = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\' + $adapter.InterfaceGuid
-    $configured = ''
-    try {
-        $configured = [string](Get-ItemPropertyValue `
-            -LiteralPath $registryPath -Name NameServer `
-            -ErrorAction Stop)
-    } catch {
-        $configured = ''
-    }
-    if (-not [string]::IsNullOrWhiteSpace($configured)) {
-        throw "Automatic DNS verification failed on interface $InterfaceIndex."
+    foreach ($family in $Families) {
+        if (-not (Test-WhsDnsFamilyAutomatic `
+                -InterfaceGuid $adapter.InterfaceGuid -Family $family)) {
+            throw "Automatic DNS verification failed on interface $InterfaceIndex ($family)."
+        }
     }
 }
 
@@ -388,14 +492,24 @@ try {
                 -ErrorAction Stop
         $createdBackup = $true
     }
+    $v6Targets = @(Get-WhsDnsIpv6Targets -InterfaceIndices $targets)
     foreach ($index in $targets) {
+        $addresses = @('__PRIMARY__','__SECONDARY__')
+        if ($v6Targets -contains [int]$index) {
+            $addresses += @('__PRIMARY6__','__SECONDARY6__')
+        }
         Set-DnsClientServerAddress -InterfaceIndex $index `
-            -ServerAddresses @('__PRIMARY__','__SECONDARY__') `
-            -ErrorAction Stop
+            -ServerAddresses $addresses -ErrorAction Stop
     }
     foreach ($index in $targets) {
         Assert-WhsDnsAddresses -InterfaceIndex $index `
-            -Expected @('__PRIMARY__','__SECONDARY__')
+            -Expected @('__PRIMARY__','__SECONDARY__') `
+            -AddressFamily IPv4
+        if ($v6Targets -contains [int]$index) {
+            Assert-WhsDnsAddresses -InterfaceIndex $index `
+                -Expected @('__PRIMARY6__','__SECONDARY6__') `
+                -AddressFamily IPv6
+        }
     }
     # The previous provider's per-interface DoH entries name resolvers that
     # are no longer configured. Encrypted DNS is re-applied afterwards by the
@@ -485,9 +599,16 @@ if (-not (Get-Command Add-DnsClientDohServerAddress `
     exit 6
 }
 $addresses = @('__PRIMARY__','__SECONDARY__')
+$addresses6 = @('__PRIMARY6__','__SECONDARY6__')
 $targets = @(Get-WhsDnsTargetIndices)
+$v6Targets = @(Get-WhsDnsIpv6Targets -InterfaceIndices $targets)
+# Only register the IPv6 resolvers in the machine-wide catalogue when some
+# interface will actually use them, so a machine without routed IPv6 is not
+# left advertising resolvers it can never reach.
+$catalogue = @($addresses)
+if ($v6Targets.Count -gt 0) { $catalogue += $addresses6 }
 $beforeDns = @(Get-WhsDnsSnapshot -InterfaceIndices $targets)
-$beforeDoh = foreach ($address in $addresses) {
+$beforeDoh = foreach ($address in $catalogue) {
     $entry = Get-DnsClientDohServerAddress `
         -ServerAddress $address -ErrorAction SilentlyContinue
     if ($null -eq $entry) {
@@ -506,7 +627,7 @@ $beforeDoh = foreach ($address in $addresses) {
     }
 }
 try {
-    foreach ($address in $addresses) {
+    foreach ($address in $catalogue) {
         $entry = Get-DnsClientDohServerAddress `
             -ServerAddress $address -ErrorAction SilentlyContinue
         if ($null -eq $entry) {
@@ -524,12 +645,18 @@ try {
         }
     }
     foreach ($index in $targets) {
+        $wanted = @($addresses)
+        if ($v6Targets -contains [int]$index) { $wanted += $addresses6 }
         Set-DnsClientServerAddress -InterfaceIndex $index `
-            -ServerAddresses $addresses -ErrorAction Stop
+            -ServerAddresses $wanted -ErrorAction Stop
         Assert-WhsDnsAddresses -InterfaceIndex $index `
-            -Expected $addresses
+            -Expected $addresses -AddressFamily IPv4
+        if ($v6Targets -contains [int]$index) {
+            Assert-WhsDnsAddresses -InterfaceIndex $index `
+                -Expected $addresses6 -AddressFamily IPv6
+        }
     }
-    foreach ($address in $addresses) {
+    foreach ($address in $catalogue) {
         $entry = Get-DnsClientDohServerAddress `
             -ServerAddress $address -ErrorAction Stop
         if (-not [bool]$entry.AutoUpgrade -or
@@ -541,16 +668,30 @@ try {
     # only the machine-wide catalogue above is what let earlier versions
     # report success while Windows kept resolving in the clear.
     Set-WhsDohInterface -InterfaceIndices $targets `
-        -Addresses $addresses -Template '__DOH_TEMPLATE__'
+        -Addresses $addresses -Template '__DOH_TEMPLATE__' `
+        -AddressFamily IPv4
+    if ($v6Targets.Count -gt 0) {
+        Set-WhsDohInterface -InterfaceIndices $v6Targets `
+            -Addresses $addresses6 -Template '__DOH_TEMPLATE__' `
+            -AddressFamily IPv6
+    }
     foreach ($index in $targets) {
         Assert-WhsDohInterface -InterfaceIndex $index `
-            -Expected $addresses -Template '__DOH_TEMPLATE__'
+            -Expected $addresses -Template '__DOH_TEMPLATE__' `
+            -AddressFamily IPv4
+        if ($v6Targets -contains [int]$index) {
+            Assert-WhsDohInterface -InterfaceIndex $index `
+                -Expected $addresses6 -Template '__DOH_TEMPLATE__' `
+                -AddressFamily IPv6
+        }
     }
     # Re-apply the servers so the DNS client re-reads the interface
     # configuration instead of waiting for the next network change.
     foreach ($index in $targets) {
+        $wanted = @($addresses)
+        if ($v6Targets -contains [int]$index) { $wanted += $addresses6 }
         Set-DnsClientServerAddress -InterfaceIndex $index `
-            -ServerAddresses $addresses -ErrorAction Stop
+            -ServerAddresses $wanted -ErrorAction Stop
     }
     Clear-DnsClientCache -ErrorAction Stop
 } catch {
@@ -585,8 +726,10 @@ if (-not (Get-Command Set-DnsClientDohServerAddress `
     exit 6
 }
 $addresses = @('__PRIMARY__','__SECONDARY__')
+$addresses6 = @('__PRIMARY6__','__SECONDARY6__')
 $targets = @(Get-WhsDnsTargetIndices)
-$beforeDoh = foreach ($address in $addresses) {
+$v6Targets = @(Get-WhsDnsIpv6Targets -InterfaceIndices $targets)
+$beforeDoh = foreach ($address in ($addresses + $addresses6)) {
     $entry = Get-DnsClientDohServerAddress `
         -ServerAddress $address -ErrorAction SilentlyContinue
     if ($null -ne $entry) {
@@ -621,8 +764,10 @@ try {
         }
     }
     foreach ($index in $targets) {
+        $wanted = @($addresses)
+        if ($v6Targets -contains [int]$index) { $wanted += $addresses6 }
         Set-DnsClientServerAddress -InterfaceIndex $index `
-            -ServerAddresses $addresses -ErrorAction Stop
+            -ServerAddresses $wanted -ErrorAction Stop
     }
     Clear-DnsClientCache -ErrorAction Stop
 } catch {

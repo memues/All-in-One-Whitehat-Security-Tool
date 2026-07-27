@@ -147,7 +147,7 @@ CLI flags:
 | 3 firewall profile toggles + 4 firewall block rules  | ✓ |
 | Block-all-outbound rule                              | Removed in v7.4.5 — it cuts the machine off the network, including this program's own checks. Any rule left by an earlier version is deleted on upgrade |
 | Hosts-based blocklists (Trackers / Malware / Telemetry) | ✓ |
-| Routed-adapter DNS switching with verification, repair, and transactional rollback | ✓ |
+| Routed-adapter DNS switching with verification, repair, and transactional rollback | ✓ — IPv4 and IPv6 resolvers together; IPv6 is applied only on interfaces holding an IPv6 default route, and the status line says when it was skipped |
 | DNS-over-HTTPS for both provider resolvers (Windows 11) | ✓ — sets the per-interface `DohInterfaceSettings` keys Windows actually reads, so the adapter reports Encrypted in Settings; encrypted-preferred with fallback, so an unreachable DoH endpoint cannot take name resolution down |
 | DNS-bypass lock                                      | Disabled — the legacy blanket port-53 rule also blocked the Windows DNS client |
 | ETW provider listener                                | TODO |
