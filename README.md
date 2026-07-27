@@ -174,7 +174,8 @@ CLI flags:
 | Hosts-based blocklists (Trackers / Malware / Telemetry) | ✓ |
 | Routed-adapter DNS switching with verification, repair, and transactional rollback | ✓ — IPv4 and IPv6 resolvers together; IPv6 is applied only on interfaces holding an IPv6 default route, and the status line says when it was skipped |
 | DNS-over-HTTPS for both provider resolvers (Windows 11) | ✓ — sets the per-interface `DohInterfaceSettings` keys Windows actually reads, so the adapter reports Encrypted in Settings; encrypted-preferred with fallback, so an unreachable DoH endpoint cannot take name resolution down |
-| DNS-bypass lock                                      | Disabled — the legacy blanket port-53 rule also blocked the Windows DNS client |
+| DNS-bypass lock                                      | Removed in v7.4.15 — a blanket port-53 block also blocks the Windows DNS client. Any rule left by an earlier version is deleted on upgrade |
+| Security event monitoring                            | Needs elevation or membership of the local **Event Log Readers** group. The Settings page marks the category `[UNAVAILABLE]` and the log says why, instead of appearing to watch |
 | ETW provider listener                                | TODO |
 | WinRT toast (vs legacy balloons)                     | TODO |
 | Sidebar collapse animation                           | TODO |

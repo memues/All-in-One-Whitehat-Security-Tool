@@ -115,7 +115,12 @@ public sealed class NotifyConfig
     [JsonPropertyName("PF_BlockTrackers")]  public bool PF_BlockTrackers  { get; set; }
     [JsonPropertyName("PF_BlockMalware")]   public bool PF_BlockMalware   { get; set; }
     [JsonPropertyName("PF_BlockTelemetry")] public bool PF_BlockTelemetry { get; set; }
-    [JsonPropertyName("PF_BlockDNSBypass")] public bool PF_BlockDNSBypass { get; set; }
+    // PF_BlockDNSBypass was removed in v7.4.15. It only ever offered to
+    // create a blanket outbound port-53 block, which also blocks the Windows
+    // DNS client itself, so the toggle had been permanently disabled and
+    // greyed out. Any WHS_DNSLock_Out rule left by an old version is deleted
+    // during install; see ElevationHelper.RetiredFirewallRuleNames. The key
+    // is ignored if it is still present in an old config file.
 
     // ---------------- DNS (2) ----------------
 
@@ -159,7 +164,6 @@ public sealed class NotifyConfig
         PF_BlockTrackers         = false,
         PF_BlockMalware          = false,
         PF_BlockTelemetry        = false,
-        PF_BlockDNSBypass        = false,
         DNS_Provider             = "None",
         DNS_DoH                  = false,
     };

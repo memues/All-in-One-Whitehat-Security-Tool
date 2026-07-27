@@ -544,23 +544,11 @@ if (Test-Path $hosts) {{
         return RunElevated(script, logger);
     }
 
-    /// <summary>
-    /// Block outbound port 53 traffic so applications can no longer bypass
-    /// the system DNS resolver. Used together with DNS_Provider to enforce
-    /// a specific DNS server for everything on the machine.
-    /// </summary>
-    public static int SetDnsBypassBlock(bool enabled, Logger? logger = null)
-    {
-        if (enabled)
-        {
-            logger?.Warn(
-                "DNS bypass lock rejected: a blanket port-53 block also blocks the Windows DNS client.");
-            return -6;
-        }
-        return RunElevated(
-            "Get-NetFirewallRule -DisplayName 'WHS_DNSLock_Out' -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
-            logger);
-    }
+    // SetDnsBypassBlock was removed in v7.4.15 along with the settings
+    // toggle. The only thing it could do was create a blanket outbound
+    // port-53 rule, which blocks the Windows DNS client as well as whatever
+    // it was meant to stop, so the enable path had already been turned into
+    // a refusal. WHS_DNSLock_Out is swept up by RetiredFirewallRuleNames.
 
     /// <summary>
     /// Configure DNS-over-HTTPS for the active providers. Requires Windows 11

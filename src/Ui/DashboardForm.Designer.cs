@@ -618,12 +618,15 @@ public sealed partial class DashboardForm
     /// so on the checkbox rather than presenting a detection that cannot
     /// fire as if it were active.
     /// </summary>
+    private static string SecurityEventsLabel() =>
+        Engines.SecurityEventEngine.CanReadSecurityLog()
+            ? "Security Events"
+            : "Security Events  [UNAVAILABLE]";
+
     private static string SecurityEventsDescription() =>
         Engines.SecurityEventEngine.CanReadSecurityLog()
             ? "Remote logons, failed logins, new accounts"
-            : "Remote logons, failed logins, new accounts — UNAVAILABLE: "
-              + "the Security log needs elevation or membership of the "
-              + "local \"Event Log Readers\" group";
+            : "Needs elevation or Event Log Readers membership";
 
     /// <summary>
     /// Keeps a control's right (and optionally bottom) edge a fixed margin
@@ -839,7 +842,7 @@ public sealed partial class DashboardForm
             ("Process",    "Unsigned Processes",           "New processes running without a valid digital signature"),
             ("Listener",   "New Listening Ports",          "New ports opened for incoming connections"),
             ("Registry",   "Registry Startup Key Changes", "Modifications to Run/RunOnce and tamper-protection keys"),
-            ("Security",   "Security Events",              SecurityEventsDescription()),
+            ("Security",   SecurityEventsLabel(),          SecurityEventsDescription()),
             ("RDP",        "Remote Desktop (RDP) Status",  "Alert when Remote Desktop is enabled"),
             ("Hosts",      "Hosts File Modifications",     "Changes to the hosts file that could redirect DNS"),
         };
@@ -882,9 +885,6 @@ public sealed partial class DashboardForm
         y = AddSettingCheckbox(page, "PF_BlockTrackers",  "Block Trackers",     "Block known tracking domains via hosts file",          _config.PF_BlockTrackers,  y);
         y = AddSettingCheckbox(page, "PF_BlockMalware",   "Block Malware",      "Block known malware domains via hosts file",            _config.PF_BlockMalware,   y);
         y = AddSettingCheckbox(page, "PF_BlockTelemetry", "Block Telemetry",    "Block Windows and third-party telemetry domains",       _config.PF_BlockTelemetry, y);
-        y = AddSettingCheckbox(page, "PF_BlockDNSBypass", "Prevent DNS Bypass (unavailable)", "Disabled: a blanket port 53 rule also blocks the Windows DNS client", false, y);
-        _config.PF_BlockDNSBypass = false;
-        _settingsCheckboxes["PF_BlockDNSBypass"].Enabled = false;
 
         // -------- DNS section --------
         y = AddSectionHeader(page, "DNS & Secure DNS  [admin]", y + 8);

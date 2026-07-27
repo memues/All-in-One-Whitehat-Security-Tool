@@ -1129,9 +1129,28 @@ Run("An unreadable Security log is reported, not hidden", () =>
         engine.Initialize();
         _ = engine.Scan().ToList();
 
-        var readable = SecurityEventEngine.CanReadSecurityLog();
-        // Whatever this machine allows, the engine's own view of itself has
-        // to agree with the probe the Settings page uses.
+        // Probe independently rather than trusting the production helper.
+        // The first version of this test asked the helper whether the log
+        // was readable and then asserted the engine agreed with it — both
+        // said yes on a machine where the log is not readable at all, and
+        // the test passed while the feature was dead.
+        bool readable;
+        try
+        {
+            var strict = new System.Diagnostics.Eventing.Reader.EventLogQuery(
+                "Security",
+                System.Diagnostics.Eventing.Reader.PathType.LogName)
+            {
+                TolerateQueryErrors = false,
+            };
+            using var reader =
+                new System.Diagnostics.Eventing.Reader.EventLogReader(strict);
+            reader.ReadEvent(TimeSpan.FromSeconds(3))?.Dispose();
+            readable = true;
+        }
+        catch { readable = false; }
+
+        Equal(readable, SecurityEventEngine.CanReadSecurityLog());
         Equal(readable, engine.IsAvailable);
 
         var written = Directory.EnumerateFiles(logDir, "monitor_*.log")

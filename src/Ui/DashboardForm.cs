@@ -1409,7 +1409,6 @@ public sealed partial class DashboardForm : Form
                 () => ElevationHelper.SetHostsBlocklist("Malware", cb.Checked, _logger)); break;
             case "PF_BlockTelemetry": await TogglePrivilegedAsync(cb, () => _config.PF_BlockTelemetry = cb.Checked,
                 () => ElevationHelper.SetHostsBlocklist("Telemetry", cb.Checked, _logger)); break;
-            case "PF_BlockDNSBypass": SetCheckedWithoutHandler(cb, false); break;
 
             case "DNS_DoH":
                 var dnsApplied = await TogglePrivilegedAsync(
@@ -1787,7 +1786,6 @@ public sealed partial class DashboardForm : Form
                 "PF_BlockTrackers"         => _config.PF_BlockTrackers,
                 "PF_BlockMalware"          => _config.PF_BlockMalware,
                 "PF_BlockTelemetry"        => _config.PF_BlockTelemetry,
-                "PF_BlockDNSBypass"        => _config.PF_BlockDNSBypass,
                 "DNS_DoH"                  => _config.DNS_DoH,
                 _                          => cb.Checked,
             };

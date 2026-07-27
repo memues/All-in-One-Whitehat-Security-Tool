@@ -36,8 +36,24 @@ public sealed class SecurityEventEngine : IMonitorEngine
 
     public void Initialize()
     {
+        // The scan query below sets TolerateQueryErrors so that one bad
+        // record cannot abort a whole read. That same flag turns an access
+        // denial into a null record instead of an exception, which is
+        // indistinguishable from "the log is empty" — so availability has to
+        // be established with a strict probe first, or the engine concludes
+        // it is working fine while reading nothing at all.
+        if (!CanReadSecurityLog())
+        {
+            MarkUnavailable(
+                "the Windows Security log cannot be read by this account");
+            return;
+        }
+
         try { ReadRecent(TimeSpan.FromMinutes(2), markOnly: true); }
-        catch (Exception ex) { MarkUnavailable(ex); }
+        catch (Exception ex)
+        {
+            MarkUnavailable($"{ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public IEnumerable<Alert> Scan()
@@ -49,26 +65,28 @@ public sealed class SecurityEventEngine : IMonitorEngine
         }
         catch (Exception ex)
         {
-            MarkUnavailable(ex);
+            MarkUnavailable($"{ex.GetType().Name}: {ex.Message}");
             return Array.Empty<Alert>();
         }
     }
 
-    private void MarkUnavailable(Exception ex)
+    private void MarkUnavailable(string reason)
     {
         if (!_available) return;
         _available = false;
         _logger?.Warn(
-            "Security event monitoring is OFF: the Windows Security log "
-            + $"cannot be read ({ex.GetType().Name}: {ex.Message}). "
+            $"Security event monitoring is OFF: {reason}. "
             + "Remote logons, failed logons and new local accounts will not "
             + "raise alerts. Run the program elevated, or add this account "
             + "to the local \"Event Log Readers\" group, to enable it.");
     }
 
     /// <summary>
-    /// Cheap check used by the Settings page so the category can be labelled
-    /// honestly instead of looking active when it cannot work.
+    /// Strict readability probe, used by Initialize and by the Settings page.
+    ///
+    /// TolerateQueryErrors is deliberately off here. With it on, a denied
+    /// read returns null rather than throwing, so this would answer "yes,
+    /// readable" on every standard-user install.
     /// </summary>
     public static bool CanReadSecurityLog()
     {
@@ -76,7 +94,7 @@ public sealed class SecurityEventEngine : IMonitorEngine
         {
             var query = new EventLogQuery("Security", PathType.LogName)
             {
-                TolerateQueryErrors = true,
+                TolerateQueryErrors = false,
                 ReverseDirection = true,
             };
             using var reader = new EventLogReader(query);
