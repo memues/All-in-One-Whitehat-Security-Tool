@@ -732,10 +732,17 @@ Run("Registry engine reports a Run-key change after its baseline", () =>
     {
         var engine = new RegistryEngine(new Logger(logDir));
         engine.Initialize();
-        Equal(0, engine.Scan().Count());
+        // Only this test's value is asserted on. Other watched keys belong
+        // to the machine and may legitimately change mid-run, which is not
+        // this test's business.
+        Equal(0, CountFor(engine.Scan(), valueName));
 
-        using (var key = Registry.CurrentUser.OpenSubKey(runKey, true)
-            ?? throw new InvalidOperationException("No HKCU Run key."))
+        // CreateSubKey, not OpenSubKey: a fresh Windows profile — a CI
+        // runner, for instance — has no HKCU Run key until something writes
+        // one, and the engine handles that case too.
+        using (var key = Registry.CurrentUser.CreateSubKey(runKey, true)
+            ?? throw new InvalidOperationException(
+                "Could not open the HKCU Run key."))
         {
             key.SetValue(
                 valueName, @"C:\example\persist.exe",
@@ -743,13 +750,11 @@ Run("Registry engine reports a Run-key change after its baseline", () =>
         }
 
         var added = engine.Scan().ToList();
-        Equal(
-            true,
-            added.All(a => a.Category == "Registry"));
         var mine = added
             .Where(a => a.Message.Contains(valueName, StringComparison.Ordinal))
             .ToList();
         Equal(2, mine.Count);
+        Equal(true, mine.All(a => a.Category == "Registry"));
         Equal(true, mine.All(a => a.Title == "REGISTRY ADDED"));
         // The payload is what makes the Undo button work.
         Equal(
@@ -759,11 +764,11 @@ Run("Registry engine reports a Run-key change after its baseline", () =>
                 && a.Extra.ContainsKey(
                     RegistryRollbackService.PayloadMetadataKey)));
 
-        // A scan with nothing new must be silent, or the alert list fills
-        // with the same finding every ten seconds.
-        Equal(0, engine.Scan().Count());
+        // A rescan with nothing new must not repeat the finding, or the
+        // alert list fills with it every ten seconds.
+        Equal(0, CountFor(engine.Scan(), valueName));
 
-        using (var key = Registry.CurrentUser.OpenSubKey(runKey, true)!)
+        using (var key = Registry.CurrentUser.CreateSubKey(runKey, true)!)
             key.DeleteValue(valueName, false);
 
         var removed = engine.Scan()
@@ -782,6 +787,10 @@ Run("Registry engine reports a Run-key change after its baseline", () =>
         catch { }
         try { Directory.Delete(logDir, recursive: true); } catch { }
     }
+
+    static int CountFor(IEnumerable<Alert> alerts, string name) =>
+        alerts.Count(
+            a => a.Message.Contains(name, StringComparison.Ordinal));
 });
 
 Run("Registry snapshots preserve binary and multi-string data", () =>
