@@ -2,6 +2,26 @@
 
 A real-time Windows security monitoring tool written in C# / .NET 8 / WinForms. Compiles to a single self-contained `.exe`.
 
+## Screenshots
+
+### Live Monitoring Status
+
+Alert counter, connection and process counts, uptime, and a security-posture row covering Defender, Firewall, UAC, RDP, Secure Boot, TPM, HVCI and BitLocker.
+
+![Live monitoring status page](docs/screenshots/status.png)
+
+### Alert History
+
+Every finding with severity, category and message, searchable and filterable, exportable to CSV or JSON. Selecting a row opens the detail pane, whose action strip offers exactly the responses that apply to that finding — here a connection alert offers Inspect Finding, Kill PID, IP Lookup, Block IP, Copy Row and Copy Message. Alerts already dealt with are marked `[MITIGATED]`. History is written to disk, so it survives restarts.
+
+![Alert history page with the response action buttons](docs/screenshots/alerts.png)
+
+### AI Threat Detection
+
+On-demand scan across the three behavioural engines: hidden processes, executable private (RWX) memory, and loaded drivers matching known bring-your-own-vulnerable-driver names.
+
+![AI threat detection page](docs/screenshots/ai-threats.png)
+
 This repository previously also contained a PowerShell implementation (`SecurityMonitor.ps1`) plus an experimental C kernel driver. Both have been removed — only the C# version remains. The C# version avoids PowerShell-specific AMSI heuristics that the script implementation triggered because of its plaintext attack-tool name lists, hidden-window plus execution-policy-bypass combination, and download-cradle install pattern.
 
 A compiled `.exe` reduces those script-specific triggers; endpoint security products can and should still scan the resulting binary:
