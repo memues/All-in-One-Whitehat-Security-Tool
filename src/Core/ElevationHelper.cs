@@ -97,6 +97,16 @@ $backup = Join-Path $dataDir 'dns-backup.json'
 if (Test-Path $backup) {
     $saved = @(Get-Content $backup -Raw | ConvertFrom-Json)
     foreach ($adapter in $saved) {
+        # Per-interface DNS-over-HTTPS lives outside the DNS client cmdlets
+        # and survives a plain DNS reset, so an uninstall used to leave the
+        # adapter pinned to encrypted DNS for resolvers nobody sets anymore.
+        $nic = Get-NetAdapter -InterfaceIndex ([int]$adapter.InterfaceIndex) -ErrorAction SilentlyContinue
+        if ($null -ne $nic) {
+            $dohKey = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' + $nic.InterfaceGuid + '\DohInterfaceSettings'
+            if (Test-Path -LiteralPath $dohKey) {
+                Remove-Item -LiteralPath $dohKey -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
         # 'Automatic' records whether the adapter had NO statically
         # configured name server before we touched it. Deciding from
         # ServerAddresses instead pinned the DHCP-supplied resolvers as a

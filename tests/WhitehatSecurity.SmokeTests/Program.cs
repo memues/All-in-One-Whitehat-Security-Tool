@@ -115,6 +115,41 @@ Run("Secure DNS configures both resolvers without destructive disable", () =>
     AssertPowerShellParses(disable);
 });
 
+Run("Secure DNS switches the adapter, not just the server catalogue", () =>
+{
+    // Add-DnsClientDohServerAddress only records that an IP speaks DoH.
+    // Windows decides whether an adapter is encrypted from
+    // Dnscache\InterfaceSpecificParameters\<guid>\DohInterfaceSettings, and
+    // that is what the Settings app shows. Verifying only the catalogue is
+    // why the dashboard said "applied and verified" over plaintext DNS.
+    var enable = DnsConfiguration.BuildDohScript(true, "Cloudflare");
+    Contains(@"DohInterfaceSettings\Doh", enable);
+    Contains("Set-WhsDohInterface -InterfaceIndices $targets", enable);
+    Contains("Assert-WhsDohInterface -InterfaceIndex $index", enable);
+    Contains("-Name DohFlags -Value 1", enable);
+    Contains("-PropertyType QWord", enable);
+    Contains("-Name DohTemplate", enable);
+
+    // Turning it off has to clear those keys, or Windows keeps resolving
+    // over DoH while the dashboard shows the toggle as off.
+    var disable = DnsConfiguration.BuildDohScript(false, "Cloudflare");
+    Contains("Remove-WhsDohInterface -InterfaceIndices $targets", disable);
+    Contains("Assert-WhsDohInterfaceCleared", disable);
+
+    // Switching provider or going back to automatic must not leave the
+    // previous provider's resolvers registered for encryption.
+    var provider = DnsConfiguration.BuildProviderScript("Quad9");
+    Contains("Remove-WhsDohInterface -InterfaceIndices $targets", provider);
+    var reset = DnsConfiguration.BuildProviderScript("None");
+    Contains("Remove-WhsDohInterface -InterfaceIndices $targets", reset);
+    Contains("Assert-WhsDohInterfaceCleared", reset);
+
+    AssertPowerShellParses(enable);
+    AssertPowerShellParses(disable);
+    AssertPowerShellParses(provider);
+    AssertPowerShellParses(reset);
+});
+
 Run("DNS provider names come from a single catalog", () =>
 {
     Equal(
@@ -181,6 +216,10 @@ Run("Uninstall cleanup restores automatic DNS and both DoH resolvers", () =>
 
     // OpenDNS has no managed DoH template, so it must not be listed.
     DoesNotContain("208.67.222.222", script);
+
+    // Per-interface encrypted-DNS keys outlive a plain DNS reset, so the
+    // uninstaller has to delete them too.
+    Contains("DohInterfaceSettings", script);
 
     AssertPowerShellParses(script);
 });

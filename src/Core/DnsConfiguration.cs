@@ -256,6 +256,102 @@ function Assert-WhsDnsAddresses {
     }
 }
 
+# Per-interface DNS-over-HTTPS. Add-DnsClientDohServerAddress only fills the
+# machine-wide catalogue of "servers known to speak DoH"; it does NOT switch
+# an adapter to encrypted DNS. Windows decides that from
+# Dnscache\InterfaceSpecificParameters\<guid>\DohInterfaceSettings\Doh\<ip>,
+# which is also what the Settings app reads. Without these keys the dashboard
+# reported "applied and verified" while Windows showed the adapter as
+# unencrypted and kept resolving over plaintext UDP 53.
+#
+# DohFlags is a QWORD: 1 = use DoH, fall back to unencrypted if the resolver
+# is unreachable. Microsoft does not document the values; 1 is the setting
+# Windows itself writes for an automatic template and the only one verified
+# here end to end. Fallback stays enabled on purpose — an unreachable DoH
+# endpoint must not take name resolution down with it.
+function Get-WhsDohInterfacePath {
+    param([int] $InterfaceIndex)
+    $adapter = Get-NetAdapter -InterfaceIndex $InterfaceIndex `
+        -ErrorAction Stop
+    return 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' + $adapter.InterfaceGuid + '\DohInterfaceSettings\Doh'
+}
+
+function Set-WhsDohInterface {
+    param(
+        [int[]] $InterfaceIndices,
+        [string[]] $Addresses,
+        [string] $Template)
+    foreach ($index in $InterfaceIndices) {
+        $path = Get-WhsDohInterfacePath -InterfaceIndex $index
+        New-Item -Path $path -Force -ErrorAction Stop | Out-Null
+        # Entries for resolvers we are no longer configuring have to go, or
+        # switching provider leaves the previous provider's addresses behind
+        # and Windows keeps offering them.
+        Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue |
+            Where-Object { $Addresses -notcontains $_.PSChildName } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($address in $Addresses) {
+            $entry = Join-Path $path $address
+            New-Item -Path $entry -Force -ErrorAction Stop | Out-Null
+            New-ItemProperty -Path $entry -Name DohFlags -Value 1 `
+                -PropertyType QWord -Force -ErrorAction Stop | Out-Null
+            New-ItemProperty -Path $entry -Name DohTemplate `
+                -Value $Template -PropertyType String -Force `
+                -ErrorAction Stop | Out-Null
+        }
+    }
+}
+
+function Remove-WhsDohInterface {
+    param([int[]] $InterfaceIndices)
+    foreach ($index in $InterfaceIndices) {
+        $path = Get-WhsDohInterfacePath -InterfaceIndex $index
+        if (Test-Path -LiteralPath $path) {
+            Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Assert-WhsDohInterface {
+    param(
+        [int] $InterfaceIndex,
+        [string[]] $Expected,
+        [string] $Template)
+    $path = Get-WhsDohInterfacePath -InterfaceIndex $InterfaceIndex
+    $names = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty PSChildName)
+    foreach ($address in $Expected) {
+        if ($names -notcontains $address) {
+            throw "Encrypted DNS was not enabled for $address on interface $InterfaceIndex."
+        }
+        $entry = Join-Path $path $address
+        if ([int64](Get-ItemPropertyValue -LiteralPath $entry `
+                -Name DohFlags -ErrorAction Stop) -ne 1) {
+            throw "Encrypted DNS flag is wrong for $address on interface $InterfaceIndex."
+        }
+        if ([string](Get-ItemPropertyValue -LiteralPath $entry `
+                -Name DohTemplate -ErrorAction Stop) -ne $Template) {
+            throw "Encrypted DNS template is wrong for $address on interface $InterfaceIndex."
+        }
+    }
+    foreach ($name in $names) {
+        if ($Expected -notcontains $name) {
+            throw "A stale encrypted-DNS entry for $name remains on interface $InterfaceIndex."
+        }
+    }
+}
+
+function Assert-WhsDohInterfaceCleared {
+    param([int] $InterfaceIndex)
+    $path = Get-WhsDohInterfacePath -InterfaceIndex $InterfaceIndex
+    $names = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty PSChildName)
+    if ($names.Count -gt 0) {
+        throw "Encrypted DNS is still configured on interface $InterfaceIndex."
+    }
+}
+
 function Assert-WhsDnsAutomatic {
     param([int] $InterfaceIndex)
     $adapter = Get-NetAdapter -InterfaceIndex $InterfaceIndex `
@@ -301,6 +397,10 @@ try {
         Assert-WhsDnsAddresses -InterfaceIndex $index `
             -Expected @('__PRIMARY__','__SECONDARY__')
     }
+    # The previous provider's per-interface DoH entries name resolvers that
+    # are no longer configured. Encrypted DNS is re-applied afterwards by the
+    # DoH script when the user has it switched on.
+    Remove-WhsDohInterface -InterfaceIndices $targets
     Clear-DnsClientCache -ErrorAction Stop
 } catch {
     $failure = $_
@@ -360,6 +460,12 @@ try {
                 -ResetServerAddresses -ErrorAction Stop
             Assert-WhsDnsAutomatic -InterfaceIndex $index
         }
+    }
+    # Going back to automatic DNS must also drop encrypted-DNS entries;
+    # otherwise Windows keeps them pinned to resolvers we no longer set.
+    Remove-WhsDohInterface -InterfaceIndices $targets
+    foreach ($index in $targets) {
+        Assert-WhsDohInterfaceCleared -InterfaceIndex $index
     }
     Clear-DnsClientCache -ErrorAction Stop
 } catch {
@@ -431,10 +537,26 @@ try {
             throw "DoH verification failed for $address."
         }
     }
+    # This is the step that actually turns the adapter encrypted. Verifying
+    # only the machine-wide catalogue above is what let earlier versions
+    # report success while Windows kept resolving in the clear.
+    Set-WhsDohInterface -InterfaceIndices $targets `
+        -Addresses $addresses -Template '__DOH_TEMPLATE__'
+    foreach ($index in $targets) {
+        Assert-WhsDohInterface -InterfaceIndex $index `
+            -Expected $addresses -Template '__DOH_TEMPLATE__'
+    }
+    # Re-apply the servers so the DNS client re-reads the interface
+    # configuration instead of waiting for the next network change.
+    foreach ($index in $targets) {
+        Set-DnsClientServerAddress -InterfaceIndex $index `
+            -ServerAddresses $addresses -ErrorAction Stop
+    }
     Clear-DnsClientCache -ErrorAction Stop
 } catch {
     $failure = $_
     try {
+        Remove-WhsDohInterface -InterfaceIndices $targets
         Restore-WhsDnsSnapshot -Snapshot $beforeDns
         foreach ($item in $beforeDoh) {
             if ([bool]$item.Exists) {
@@ -463,6 +585,7 @@ if (-not (Get-Command Set-DnsClientDohServerAddress `
     exit 6
 }
 $addresses = @('__PRIMARY__','__SECONDARY__')
+$targets = @(Get-WhsDnsTargetIndices)
 $beforeDoh = foreach ($address in $addresses) {
     $entry = Get-DnsClientDohServerAddress `
         -ServerAddress $address -ErrorAction SilentlyContinue
@@ -476,6 +599,13 @@ $beforeDoh = foreach ($address in $addresses) {
     }
 }
 try {
+    # Clearing the per-interface entries is what returns the adapter to
+    # unencrypted. Only lowering AutoUpgrade in the machine-wide catalogue
+    # left Windows resolving over DoH with the dashboard showing it off.
+    Remove-WhsDohInterface -InterfaceIndices $targets
+    foreach ($index in $targets) {
+        Assert-WhsDohInterfaceCleared -InterfaceIndex $index
+    }
     foreach ($item in @($beforeDoh)) {
         Set-DnsClientDohServerAddress `
             -ServerAddress $item.ServerAddress `
@@ -489,6 +619,10 @@ try {
         if ([bool]$entry.AutoUpgrade) {
             throw "DoH disable verification failed for $($item.ServerAddress)."
         }
+    }
+    foreach ($index in $targets) {
+        Set-DnsClientServerAddress -InterfaceIndex $index `
+            -ServerAddresses $addresses -ErrorAction Stop
     }
     Clear-DnsClientCache -ErrorAction Stop
 } catch {
