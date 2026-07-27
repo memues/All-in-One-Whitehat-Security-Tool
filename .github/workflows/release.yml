@@ -23,15 +23,13 @@ jobs:
           dotnet-version: "8.0.x"
 
       - name: Restore
-        run: |
-          dotnet restore WhitehatSecurity.csproj
-          dotnet restore tests/WhitehatSecurity.SmokeTests/WhitehatSecurity.SmokeTests.csproj
+        run: dotnet restore WhitehatSecurity.csproj -r win-x64
 
       - name: Run smoke tests
-        run: dotnet run --project tests/WhitehatSecurity.SmokeTests/WhitehatSecurity.SmokeTests.csproj -c Release --no-restore
+        run: dotnet run --project tests/WhitehatSecurity.SmokeTests/WhitehatSecurity.SmokeTests.csproj -c Release
 
       - name: Publish self-contained Windows executable
-        run: dotnet publish WhitehatSecurity.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifacts/publish
+        run: dotnet publish WhitehatSecurity.csproj -c Release -r win-x64 --self-contained true -o artifacts/publish
 
       - name: Prepare release assets
         shell: pwsh
