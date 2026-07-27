@@ -471,9 +471,13 @@ public sealed partial class DashboardForm
         _alertContextMenu.Opening += OnAlertContextMenuOpening;
 
         // ── Alerts list ──
+        // Bounds are computed in LayoutAlertsPage from the page's real size.
+        // These used to be anchored Top|Bottom against a design-time height,
+        // which left the list hundreds of pixels taller than the page at
+        // every window size, with its last rows unreachable below the edge.
         _alertsList.Location      = new Point(8, 84);
-        _alertsList.Size          = new Size(540, 556);
-        _alertsList.Anchor        = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left;
+        _alertsList.Size          = new Size(540, 400);
+        _alertsList.Anchor        = AnchorStyles.Top | AnchorStyles.Left;
         _alertsList.View          = View.Details;
         _alertsList.FullRowSelect = true;
         _alertsList.GridLines     = false;
@@ -493,19 +497,20 @@ public sealed partial class DashboardForm
 
         // Detail panel on the right
         _alertDetail.Location  = new Point(560, 84);
-        _alertDetail.Size      = new Size(490, 556);
+        _alertDetail.Size      = new Size(490, 400);
         _alertDetail.BackColor = Theme.Card;
-        _alertDetail.Anchor    = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        _alertDetail.Anchor    = AnchorStyles.Top | AnchorStyles.Left;
+
+        _alertDetail.Padding = new Padding(16, 14, 16, 12);
 
         _alertDetailTitle.Text      = "Select an alert to view details";
         _alertDetailTitle.Font      = new Font("Segoe UI", 12, FontStyle.Bold);
         _alertDetailTitle.ForeColor = Theme.TextDim;
-        _alertDetailTitle.Location  = new Point(16, 16);
-        _alertDetailTitle.Size      = new Size(460, 24);
-        _alertDetail.Controls.Add(_alertDetailTitle);
+        _alertDetailTitle.Dock      = DockStyle.Top;
+        _alertDetailTitle.Height    = 28;
+        _alertDetailTitle.AutoEllipsis = true;
 
-        _alertDetailBody.Location   = new Point(16, 50);
-        _alertDetailBody.Size       = new Size(460, 360);
+        _alertDetailBody.Dock       = DockStyle.Fill;
         _alertDetailBody.Multiline  = true;
         _alertDetailBody.ReadOnly   = true;
         // WordWrap off + Both scrollbars so a long path or message is
@@ -517,33 +522,54 @@ public sealed partial class DashboardForm
         _alertDetailBody.ForeColor  = Theme.TextMain;
         _alertDetailBody.Font       = Theme.Mono(9);
         _alertDetailBody.BorderStyle = BorderStyle.None;
-        _alertDetail.Controls.Add(_alertDetailBody);
+        // Action buttons. Every entry in the right-click menu has a button
+        // here as well, so the actions are discoverable without knowing the
+        // context menu exists. The flow panel wraps and auto-sizes, which is
+        // what keeps them inside the panel at every window size.
+        _alertActions.Dock          = DockStyle.Bottom;
+        _alertActions.AutoSize      = true;
+        _alertActions.AutoSizeMode  = AutoSizeMode.GrowAndShrink;
+        _alertActions.WrapContents  = true;
+        _alertActions.FlowDirection = FlowDirection.LeftToRight;
+        _alertActions.Padding       = new Padding(0, 8, 0, 0);
+        _alertActions.Margin        = Padding.Empty;
+        _alertActions.BackColor     = Theme.Card;
 
-        // Action buttons
-        StyleActionButton(_btnInspectThreat, "Inspect Finding", new Point(16, 382), 110);
+        StyleActionButton(_btnInspectThreat, "Inspect Finding");
         _btnInspectThreat.Click += OnInspectThreatClick;
-        StyleActionButton(_btnIpLookup,    "IP Lookup",     new Point(16, 458), 110);
-        _btnIpLookup.Click    += OnIpLookupClick;
-        StyleActionButton(_btnOpenLog,     "Show File",     new Point(132, 382), 110);
-        _btnOpenLog.Click     += OnOpenLogClick;
-        StyleActionButton(_btnRegedit,     "Open Regedit",  new Point(132, 382), 110);
-        _btnRegedit.Click     += OnRegeditClick;
-        StyleActionButton(_btnRemediate, "Remediate", new Point(16, 420), 226);
+        StyleActionButton(_btnOpenLog, "Show File in Explorer");
+        _btnOpenLog.Click += OnOpenLogClick;
+        StyleActionButton(_btnRegedit, "Open in Regedit");
+        _btnRegedit.Click += OnRegeditClick;
+        StyleActionButton(_btnRemediate, "Remediate");
         _btnRemediate.Click += OnRemediateClick;
-        StyleActionButton(_btnUndoRemediation, "Undo", new Point(248, 420), 226);
+        StyleActionButton(_btnUndoRemediation, "Undo");
         _btnUndoRemediation.Click += OnUndoRemediationClick;
-        StyleActionButton(_btnBlockIp,     "Block IP (FW)", new Point(248, 458), 226);
-        _btnBlockIp.Click     += OnBlockIpClick;
-        StyleActionButton(_btnKillProcess, "Kill PID",      new Point(16, 496), 458);
+        StyleActionButton(_btnIpLookup, "IP Lookup");
+        _btnIpLookup.Click += OnIpLookupClick;
+        StyleActionButton(_btnBlockIp, "Block IP");
+        _btnBlockIp.Click += OnBlockIpClick;
+        StyleActionButton(_btnKillProcess, "Kill Process");
         _btnKillProcess.Click += OnKillProcessClick;
-        _alertDetail.Controls.Add(_btnInspectThreat);
-        _alertDetail.Controls.Add(_btnIpLookup);
-        _alertDetail.Controls.Add(_btnOpenLog);
-        _alertDetail.Controls.Add(_btnRegedit);
-        _alertDetail.Controls.Add(_btnRemediate);
-        _alertDetail.Controls.Add(_btnUndoRemediation);
-        _alertDetail.Controls.Add(_btnBlockIp);
-        _alertDetail.Controls.Add(_btnKillProcess);
+        StyleActionButton(_btnCopyRow, "Copy Row");
+        _btnCopyRow.Click += OnAlertCopyRowClick;
+        StyleActionButton(_btnCopyMessage, "Copy Message");
+        _btnCopyMessage.Click += OnAlertCopyMessageClick;
+
+        _alertActions.Controls.AddRange(new Control[]
+        {
+            _btnInspectThreat, _btnOpenLog, _btnRegedit,
+            _btnRemediate, _btnUndoRemediation,
+            _btnIpLookup, _btnBlockIp, _btnKillProcess,
+            _btnCopyRow, _btnCopyMessage,
+        });
+
+        // Fill first, then the docked edges: WinForms docks from the end of
+        // the collection inwards, so this order gives the body the space the
+        // title and the button strip do not take.
+        _alertDetail.Controls.Add(_alertDetailBody);
+        _alertDetail.Controls.Add(_alertDetailTitle);
+        _alertDetail.Controls.Add(_alertActions);
 
         page.Controls.Add(_alertDetail);
 
@@ -553,35 +579,18 @@ public sealed partial class DashboardForm
         void LayoutAlertsPage()
         {
             var width = Math.Max(680, page.ClientSize.Width);
+            // Everything below the filter row, minus a bottom margin.
+            var height = Math.Max(200, page.ClientSize.Height - 84 - 8);
             var listWidth = Math.Max(
                 360, (int)((width - 28) * 0.58));
-            _alertsList.Width = listWidth;
-            _alertDetail.Left = _alertsList.Right + 12;
-            _alertDetail.Width = Math.Max(
-                260, width - _alertDetail.Left - 8);
-            _alertDetailTitle.Width = Math.Max(
-                120, _alertDetail.ClientSize.Width - 32);
-            _alertDetailBody.Width = Math.Max(
-                120, _alertDetail.ClientSize.Width - 32);
-            _alertDetailBody.Height = Math.Max(
-                120, _alertDetail.ClientSize.Height - 218);
-
-            var half = Math.Max(
-                100, (_alertDetail.ClientSize.Width - 48) / 2);
-            var right = 24 + half;
-            var row1 = _alertDetail.ClientSize.Height - 154;
-            var row2 = _alertDetail.ClientSize.Height - 116;
-            var row3 = _alertDetail.ClientSize.Height - 78;
-            var row4 = _alertDetail.ClientSize.Height - 40;
-            _btnInspectThreat.SetBounds(16, row1, half, 32);
-            _btnOpenLog.SetBounds(right, row1, half, 32);
-            _btnRegedit.SetBounds(right, row1, half, 32);
-            _btnRemediate.SetBounds(16, row2, half, 32);
-            _btnUndoRemediation.SetBounds(right, row2, half, 32);
-            _btnIpLookup.SetBounds(16, row3, half, 32);
-            _btnBlockIp.SetBounds(right, row3, half, 32);
-            _btnKillProcess.SetBounds(
-                16, row4, _alertDetail.ClientSize.Width - 32, 32);
+            _alertsList.SetBounds(8, 84, listWidth, height);
+            var detailLeft = _alertsList.Right + 12;
+            _alertDetail.SetBounds(
+                detailLeft, 84,
+                Math.Max(260, width - detailLeft - 8), height);
+            // The title, body and button strip are docked inside
+            // _alertDetail, so they follow its size on their own — no
+            // per-control arithmetic to drift out of step.
 
             _alertsList.Columns[3].Width = Math.Max(
                 110, (_alertsList.ClientSize.Width - 325) / 2);
@@ -604,11 +613,54 @@ public sealed partial class DashboardForm
         return page;
     }
 
-    private static void StyleActionButton(Button btn, string text, Point loc, int width)
+    /// <summary>
+    /// Keeps a control's right (and optionally bottom) edge a fixed margin
+    /// inside its parent, recomputed from the parent's real client size.
+    ///
+    /// Anchor does something subtly different: it preserves the gap that
+    /// existed when the control was added. Every page here is built before
+    /// its panel has reached its final size, so those gaps were wrong from
+    /// the start and the control stayed wrong at every window size — the AI
+    /// results list ended up more than twice the width of its page, and the
+    /// Logs subtitle ran a full page-width past the right edge.
+    /// </summary>
+    private static void FitToParent(
+        Control child, int rightMargin, int bottomMargin = -1)
+    {
+        var parent = child.Parent;
+        if (parent is null) return;
+
+        child.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+
+        void Apply()
+        {
+            var width = Math.Max(
+                80, parent.ClientSize.Width - child.Left - rightMargin);
+            var height = bottomMargin < 0
+                ? child.Height
+                : Math.Max(
+                    60, parent.ClientSize.Height - child.Top - bottomMargin);
+            child.SetBounds(child.Left, child.Top, width, height);
+        }
+
+        parent.Resize += (_, _) => Apply();
+        parent.HandleCreated += (_, _) => Apply();
+        Apply();
+    }
+
+    /// <summary>
+    /// Action button for the alert detail strip. AutoSize means the caption
+    /// always fits — the fixed 110px width these used to have clipped
+    /// "Show File in Explorer" and every localized caption.
+    /// </summary>
+    private static void StyleActionButton(Button btn, string text)
     {
         btn.Text       = text;
-        btn.Location   = loc;
-        btn.Size       = new Size(width, 32);
+        btn.AutoSize   = true;
+        btn.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        btn.MinimumSize = new Size(0, 30);
+        btn.Padding    = new Padding(10, 4, 10, 4);
+        btn.Margin     = new Padding(0, 0, 8, 8);
         btn.FlatStyle  = FlatStyle.Flat;
         btn.BackColor  = Theme.BtnHover;
         btn.ForeColor  = Theme.TextMain;
@@ -681,8 +733,7 @@ public sealed partial class DashboardForm
         page.Controls.Add(_aiStatusLabel);
 
         _aiResultsList.Location      = new Point(8, 124);
-        _aiResultsList.Size          = new Size(1042, 520);
-        _aiResultsList.Anchor        = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        _aiResultsList.Size          = new Size(600, 300);
         _aiResultsList.View          = View.Details;
         _aiResultsList.FullRowSelect = true;
         _aiResultsList.GridLines     = false;
@@ -695,6 +746,7 @@ public sealed partial class DashboardForm
         _aiResultsList.Columns.Add("Title",    250);
         _aiResultsList.Columns.Add("Message",  560);
         page.Controls.Add(_aiResultsList);
+        FitToParent(_aiResultsList, rightMargin: 8, bottomMargin: 8);
         page.Resize += (_, _) =>
         {
             _aiResultsList.Columns[3].Width = Math.Max(
@@ -735,11 +787,15 @@ public sealed partial class DashboardForm
             Font      = Theme.Body(9),
             ForeColor = Theme.TextDim,
             AutoSize  = false,
-            Size      = new Size(800, 36),
+            Size      = new Size(600, 36),
             Location  = new Point(8, y),
         };
         page.Controls.Add(subtitle);
-        y += 28;
+        FitToParent(subtitle, rightMargin: 24);
+        // The label is 36 tall; advancing by 28 put the button row 8px on
+        // top of it, so the last line of the description was struck through
+        // by three buttons.
+        y += 40;
 
         // -------- Reset / Export / Import button row --------
         var btnReset  = new Button { Text = "Reset App Defaults", Location = new Point(20,  y), Size = new Size(140, 28) };
@@ -992,11 +1048,11 @@ public sealed partial class DashboardForm
             Font      = Theme.Body(9),
             ForeColor = Theme.TextDim,
             AutoSize  = false,
-            Size      = new Size(800, 36),
+            Size      = new Size(600, 36),
             Location  = new Point(8, 44),
-            Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
         body.Controls.Add(subtitle);
+        FitToParent(subtitle, rightMargin: 24);
 
         var logsDir = Paths.LogsDir;
         var files = new List<FileInfo>();

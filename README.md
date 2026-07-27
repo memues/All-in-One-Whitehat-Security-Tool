@@ -138,6 +138,8 @@ CLI flags:
 | Alert history persisted across restarts              | ✓ — replayed into the Alerts page at startup from `alert-history.jsonl`, remediation payloads included |
 | 13 alert categories, each with its own settings toggle | ✓ |
 | TCP monitoring across IPv4 **and** IPv6              | ✓ — a dual-stack socket bound to `::` appears only in the IPv6 table, so IPv4-only enumeration missed most listeners |
+| Every alert action available as a button, not only on right-click | ✓ — the detail strip wraps, so the buttons stay inside the panel at any window size |
+| Layout regression test across four window sizes      | ✓ — fails the build on any control that overflows its parent, overlaps a sibling, or clips its text |
 | Alerts page export to CSV / JSON                     | ✓ |
 | Alerts page sortable column headers                  | ✓ |
 | Category-aware alert investigation and response      | ✓ |

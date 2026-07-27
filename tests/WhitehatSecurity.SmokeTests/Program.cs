@@ -815,6 +815,29 @@ Run("Alerts response controls fit the minimum dashboard size", () =>
             Equal("Apply / Repair", dnsApply.Text);
             AssertFitsWidth(pages["Settings"], dnsApply);
             AssertFitsWidth(pages["Settings"], dnsStatus);
+
+            // Every right-click action must also exist as a button, or the
+            // capability is invisible to anyone who never right-clicks.
+            InvokePrivate(form, "ShowPage", "Alerts");
+            InvokePrivate(form, "ShowAlertDetail", fileAlert);
+            Application.DoEvents();
+            foreach (var name in new[]
+                     {
+                         "_btnInspectThreat", "_btnOpenLog", "_btnRegedit",
+                         "_btnRemediate", "_btnUndoRemediation",
+                         "_btnIpLookup", "_btnBlockIp", "_btnKillProcess",
+                         "_btnCopyRow", "_btnCopyMessage",
+                     })
+            {
+                var button = GetPrivateField<Button>(form, name);
+                if (button.Parent is null)
+                    throw new InvalidOperationException(
+                        $"{name} is not on the alert detail panel.");
+            }
+            Equal(true, GetPrivateField<Button>(form, "_btnCopyRow").Visible);
+            Equal(
+                true,
+                GetPrivateField<Button>(form, "_btnCopyMessage").Visible);
         }
         finally
         {
@@ -827,6 +850,75 @@ Run("Alerts response controls fit the minimum dashboard size", () =>
             catch { }
         }
     });
+});
+
+Run("Every page lays out cleanly at every window size", () =>
+{
+    // Walks every control on every page at four window sizes and fails on
+    // anything that leaves its parent, sits on top of a sibling, or clips
+    // its own caption. This found the alerts list running ~450px past the
+    // bottom of its page, the AI results list more than twice the page
+    // width, and the Settings description struck through by three buttons —
+    // all invisible to a test that only checked a handful of named controls.
+    var problems = new List<string>();
+    RunSta(() =>
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(), $"whs-layout-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var logger = new Logger(directory);
+            var config = NotifyConfig.Defaults();
+            config.ShowThreatDetails = true;
+            var sink = new DashboardSink();
+            var console = new ConsoleSink();
+            using var host = new MonitorHost(
+                config, logger, TimeSpan.FromMinutes(10));
+
+            foreach (var size in new[]
+                     {
+                         new System.Drawing.Size(0, 0),   // MinimumSize
+                         new System.Drawing.Size(960, 600),
+                         new System.Drawing.Size(1280, 800),
+                         new System.Drawing.Size(1920, 1080),
+                     })
+            {
+                using var form = new DashboardForm(
+                    config, logger, sink, console,
+                    Path.Combine(directory, "config.json"), host)
+                {
+                    ShowInTaskbar = false,
+                    Opacity = 0.01,
+                };
+                form.Size = size.IsEmpty ? form.MinimumSize : size;
+                form.Show();
+                Application.DoEvents();
+
+                var pages = GetPrivateField<Dictionary<string, Panel>>(
+                    form, "_navPages");
+                foreach (var name in pages.Keys.ToArray())
+                {
+                    InvokePrivate(form, "ShowPage", name);
+                    Application.DoEvents();
+                    InspectLayout(
+                        problems,
+                        $"{form.Width}x{form.Height}/{name}",
+                        pages[name]);
+                }
+                form.Close();
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    });
+
+    if (problems.Count > 0)
+        throw new InvalidOperationException(
+            $"{problems.Count} layout problem(s):{Environment.NewLine}"
+            + string.Join(Environment.NewLine, problems.Take(15)));
 });
 
 Run("BYOVD current scan does not suppress persistent findings", () =>
@@ -1058,6 +1150,95 @@ static T GetPrivateField<T>(object instance, string fieldName)
     return field.GetValue(instance) as T
         ?? throw new InvalidOperationException(
             $"Field {fieldName} is not {typeof(T).Name}.");
+}
+
+/// <summary>
+/// Recursively measures a page and records every control that overflows its
+/// parent, overlaps a sibling, clips its caption, or has collapsed to
+/// nothing.
+/// </summary>
+static void InspectLayout(List<string> problems, string context, Control root)
+{
+    var stack = new Stack<Control>();
+    stack.Push(root);
+    while (stack.Count > 0)
+    {
+        var parent = stack.Pop();
+        var children = parent.Controls.Cast<Control>()
+            .Where(c => c.Visible)
+            .ToList();
+        var scrolls = parent is ScrollableControl { AutoScroll: true };
+
+        foreach (var child in children)
+        {
+            var label = $"[{context}] {Name(child)}";
+
+            if (!(child.AutoSize && string.IsNullOrEmpty(child.Text))
+                && (child.Width <= 0 || child.Height <= 0))
+                problems.Add($"{label} has zero size");
+
+            // A sideways scrollbar on a settings page is a layout fault, so
+            // horizontal overflow is never acceptable; vertical overflow is
+            // fine only inside a scrolling container.
+            if (child.Left < 0 || child.Right > parent.ClientSize.Width)
+                problems.Add(
+                    $"{label} overflows horizontally: {child.Bounds} in {parent.ClientSize}");
+            if (!scrolls
+                && (child.Top < 0 || child.Bottom > parent.ClientSize.Height))
+                problems.Add(
+                    $"{label} overflows vertically: {child.Bounds} in {parent.ClientSize}");
+
+            if (!child.AutoSize && !string.IsNullOrEmpty(child.Text))
+            {
+                // A Label wraps, so what matters is whether the wrapped text
+                // fits the box; a Button or CheckBox renders on one line, so
+                // the caption width is what matters.
+                if (child is Label { AutoEllipsis: false } wrapping)
+                {
+                    var needed = TextRenderer.MeasureText(
+                        wrapping.Text, wrapping.Font,
+                        new System.Drawing.Size(wrapping.Width, int.MaxValue),
+                        TextFormatFlags.WordBreak);
+                    if (needed.Height > wrapping.Height)
+                        problems.Add(
+                            $"{label} clips its text: wraps to {needed.Height}px, has {wrapping.Height}px");
+                }
+                else if (child is Button or CheckBox)
+                {
+                    var needed = TextRenderer.MeasureText(
+                        child.Text, child.Font);
+                    var chrome = child is CheckBox ? 20 : 8;
+                    if (needed.Width + chrome > child.Width)
+                        problems.Add(
+                            $"{label} clips its caption: needs {needed.Width + chrome}px, has {child.Width}px");
+                }
+            }
+
+            stack.Push(child);
+        }
+
+        for (var i = 0; i < children.Count; i++)
+        for (var j = i + 1; j < children.Count; j++)
+        {
+            if (children[i].Dock != DockStyle.None
+                || children[j].Dock != DockStyle.None)
+                continue;
+            var overlap = System.Drawing.Rectangle.Intersect(
+                children[i].Bounds, children[j].Bounds);
+            if (overlap.Width > 1 && overlap.Height > 1)
+                problems.Add(
+                    $"[{context}] {Name(children[i])} overlaps {Name(children[j])} by {overlap.Width}x{overlap.Height}");
+        }
+    }
+
+    static string Name(Control c)
+    {
+        var id = string.IsNullOrEmpty(c.Name) ? c.GetType().Name : c.Name;
+        if (string.IsNullOrEmpty(c.Text)) return id;
+        var text = c.Text.Replace("\n", " ");
+        if (text.Length > 32) text = text[..32] + "…";
+        return $"{id} \"{text}\"";
+    }
 }
 
 static void AssertInside(Control parent, Control child)

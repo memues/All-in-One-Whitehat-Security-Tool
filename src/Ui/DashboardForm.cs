@@ -48,6 +48,13 @@ public sealed partial class DashboardForm : Form
     private readonly Button   _btnInspectThreat = new();
     private readonly Button   _btnRemediate     = new();
     private readonly Button   _btnUndoRemediation = new();
+    // Every right-click action is also a button here. The panel wraps, so
+    // the set can grow and the buttons still cannot overlap or run off the
+    // edge at any window size — the manual row/column arithmetic they used
+    // to sit in did both.
+    private readonly FlowLayoutPanel _alertActions = new();
+    private readonly Button   _btnCopyRow      = new();
+    private readonly Button   _btnCopyMessage  = new();
     private readonly TextBox  _alertSearch     = new();
     private readonly ComboBox _alertSeverityFilter = new();
     private readonly ComboBox _alertCategoryFilter = new();
@@ -727,6 +734,8 @@ public sealed partial class DashboardForm : Form
         _btnUndoRemediation.Visible = false;
         _btnBlockIp.Visible     = false;
         _btnKillProcess.Visible = false;
+        _btnCopyRow.Visible     = false;
+        _btnCopyMessage.Visible = false;
     }
 
     private void ShowAlertDetail(Alert a)
@@ -739,6 +748,10 @@ public sealed partial class DashboardForm : Form
 
         bool showFull = _config.ShowThreatDetails;
         _alertDetailBody.Visible = true;
+        // Copying an alert exposes nothing the list is not already showing,
+        // so these stay available even with detailed threat info switched off.
+        _btnCopyRow.Visible     = true;
+        _btnCopyMessage.Visible = true;
 
         if (!showFull)
         {
