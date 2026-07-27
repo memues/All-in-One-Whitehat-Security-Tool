@@ -19,13 +19,25 @@ public sealed class SecurityEventEngine : IMonitorEngine
 
     private readonly HashSet<long> _seen = new();
     private readonly Queue<long> _seenOrder = new();
+    private readonly Logger? _logger;
     private bool _available = true;
     private const int MaxSeen = 4096;
+
+    /// <summary>
+    /// Reading the Security log requires elevation or membership of the
+    /// local "Event Log Readers" group. The application ships as asInvoker,
+    /// so on a normal install this engine is inert — and it used to go inert
+    /// in complete silence, leaving the Settings page advertising remote
+    /// logon, failed logon and new-account detection that could never fire.
+    /// </summary>
+    public bool IsAvailable => _available;
+
+    public SecurityEventEngine(Logger? logger = null) => _logger = logger;
 
     public void Initialize()
     {
         try { ReadRecent(TimeSpan.FromMinutes(2), markOnly: true); }
-        catch { _available = false; }
+        catch (Exception ex) { MarkUnavailable(ex); }
     }
 
     public IEnumerable<Alert> Scan()
@@ -35,11 +47,43 @@ public sealed class SecurityEventEngine : IMonitorEngine
         {
             return ReadRecent(TimeSpan.FromSeconds(30), markOnly: false);
         }
-        catch
+        catch (Exception ex)
         {
-            _available = false;
+            MarkUnavailable(ex);
             return Array.Empty<Alert>();
         }
+    }
+
+    private void MarkUnavailable(Exception ex)
+    {
+        if (!_available) return;
+        _available = false;
+        _logger?.Warn(
+            "Security event monitoring is OFF: the Windows Security log "
+            + $"cannot be read ({ex.GetType().Name}: {ex.Message}). "
+            + "Remote logons, failed logons and new local accounts will not "
+            + "raise alerts. Run the program elevated, or add this account "
+            + "to the local \"Event Log Readers\" group, to enable it.");
+    }
+
+    /// <summary>
+    /// Cheap check used by the Settings page so the category can be labelled
+    /// honestly instead of looking active when it cannot work.
+    /// </summary>
+    public static bool CanReadSecurityLog()
+    {
+        try
+        {
+            var query = new EventLogQuery("Security", PathType.LogName)
+            {
+                TolerateQueryErrors = true,
+                ReverseDirection = true,
+            };
+            using var reader = new EventLogReader(query);
+            reader.ReadEvent(TimeSpan.FromSeconds(2))?.Dispose();
+            return true;
+        }
+        catch { return false; }
     }
 
     private List<Alert> ReadRecent(TimeSpan window, bool markOnly)

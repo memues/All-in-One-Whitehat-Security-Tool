@@ -226,7 +226,7 @@ internal static class Program
         host.Register(new HostsEngine());
         host.Register(new FirmwareEngine());
         host.Register(new RdpEngine());
-        host.Register(new SecurityEventEngine());
+        host.Register(new SecurityEventEngine(logger));
         // v7.3.0 — three new "AI" engines that re-use the existing P/Invoke
         // surface in NativeMethods.cs.
         host.Register(new HiddenProcessEngine());

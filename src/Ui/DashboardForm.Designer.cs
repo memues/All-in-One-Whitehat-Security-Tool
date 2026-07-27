@@ -613,6 +613,19 @@ public sealed partial class DashboardForm
     }
 
     /// <summary>
+    /// The Security log is unreadable without elevation or membership of the
+    /// local "Event Log Readers" group, and the program runs asInvoker. Say
+    /// so on the checkbox rather than presenting a detection that cannot
+    /// fire as if it were active.
+    /// </summary>
+    private static string SecurityEventsDescription() =>
+        Engines.SecurityEventEngine.CanReadSecurityLog()
+            ? "Remote logons, failed logins, new accounts"
+            : "Remote logons, failed logins, new accounts — UNAVAILABLE: "
+              + "the Security log needs elevation or membership of the "
+              + "local \"Event Log Readers\" group";
+
+    /// <summary>
     /// Keeps a control's right (and optionally bottom) edge a fixed margin
     /// inside its parent, recomputed from the parent's real client size.
     ///
@@ -826,7 +839,7 @@ public sealed partial class DashboardForm
             ("Process",    "Unsigned Processes",           "New processes running without a valid digital signature"),
             ("Listener",   "New Listening Ports",          "New ports opened for incoming connections"),
             ("Registry",   "Registry Startup Key Changes", "Modifications to Run/RunOnce and tamper-protection keys"),
-            ("Security",   "Security Events",              "Remote logons, failed logins, new accounts"),
+            ("Security",   "Security Events",              SecurityEventsDescription()),
             ("RDP",        "Remote Desktop (RDP) Status",  "Alert when Remote Desktop is enabled"),
             ("Hosts",      "Hosts File Modifications",     "Changes to the hosts file that could redirect DNS"),
         };

@@ -1113,6 +1113,59 @@ Run("BYOVD current scan does not suppress persistent findings", () =>
             "Current-state scan suppressed an existing finding.");
 });
 
+Run("An unreadable Security log is reported, not hidden", () =>
+{
+    // Reading the Security log needs elevation or membership of the local
+    // "Event Log Readers" group, and the program ships as asInvoker. The
+    // engine used to go inert in silence, so the Settings page advertised
+    // remote-logon, failed-logon and new-account detection on a normal
+    // install where none of it could ever fire.
+    var logDir = Path.Combine(
+        Path.GetTempPath(), $"whs-sec-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(logDir);
+    try
+    {
+        var engine = new SecurityEventEngine(new Logger(logDir));
+        engine.Initialize();
+        _ = engine.Scan().ToList();
+
+        var readable = SecurityEventEngine.CanReadSecurityLog();
+        // Whatever this machine allows, the engine's own view of itself has
+        // to agree with the probe the Settings page uses.
+        Equal(readable, engine.IsAvailable);
+
+        var written = Directory.EnumerateFiles(logDir, "monitor_*.log")
+            .SelectMany(File.ReadAllLines)
+            .ToList();
+        if (readable)
+        {
+            // Nothing to warn about when the log can be read.
+            Equal(
+                false,
+                written.Any(l => l.Contains(
+                    "Security event monitoring is OFF",
+                    StringComparison.Ordinal)));
+        }
+        else
+        {
+            // The user has to be told, and told how to fix it.
+            Equal(
+                true,
+                written.Any(l => l.Contains(
+                    "Security event monitoring is OFF",
+                    StringComparison.Ordinal)));
+            Equal(
+                true,
+                written.Any(l => l.Contains(
+                    "Event Log Readers", StringComparison.Ordinal)));
+        }
+    }
+    finally
+    {
+        try { Directory.Delete(logDir, recursive: true); } catch { }
+    }
+});
+
 Run("RDP and Security event engines scan without throwing", () =>
 {
     IMonitorEngine[] engines =
