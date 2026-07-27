@@ -1,4 +1,4 @@
-# All-in-One Whitehat Security Tool
+# Whitehat Security Tool
 
 A real-time Windows security monitoring tool written in C# / .NET 8 / WinForms. Compiles to a single self-contained `.exe`.
 

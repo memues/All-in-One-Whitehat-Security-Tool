@@ -334,7 +334,7 @@ public static class Installer
         key.SetValue("EstimatedSize",   (int)sizeKb, RegistryValueKind.DWord);
         key.SetValue("NoModify",        1, RegistryValueKind.DWord);
         key.SetValue("NoRepair",        1, RegistryValueKind.DWord);
-        key.SetValue("URLInfoAbout",    "https://github.com/memues/All-in-One-Whitehat-Security-Tool");
+        key.SetValue("URLInfoAbout",    "https://github.com/memues/Whitehat-Security-Tool");
     }
 
     private static void CreateShortcut(string lnkPath, string targetExe)
