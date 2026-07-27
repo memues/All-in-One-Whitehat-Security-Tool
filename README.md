@@ -73,6 +73,10 @@ CLI flags:
     │   ├── Logger.cs             # daily rolling log files
     │   ├── Alert.cs              # alert record + AlertGate
     │   ├── CsvSafety.cs          # formula-safe CSV escaping
+    │   ├── FileInvestigator.cs    # SHA-256 / signature / version inspection
+    │   ├── QuarantineManager.cs   # recoverable file quarantine
+    │   ├── RegistryRollbackService.cs # typed, conflict-safe registry rollback
+    │   ├── ServiceRemediationService.cs # stop/disable + persistent restore state
     │   └── MonitorHost.cs        # background loop runner
     ├── Engines/
     │   ├── IMonitorEngine.cs     # engine contract
@@ -131,6 +135,11 @@ CLI flags:
 | Alerts page search + severity & category filters     | ✓ |
 | Alerts page export to CSV / JSON                     | ✓ |
 | Alerts page sortable column headers                  | ✓ |
+| Category-aware alert investigation and response      | ✓ |
+| Recoverable file quarantine + restore/permanent delete | ✓ |
+| Typed registry rollback with stale-change protection | ✓ |
+| Service/driver stop-disable + persistent restore state | ✓ |
+| Firewall IP block + unblock from alert details       | ✓ |
 | Audible alert (`BeepOnAlert`)                        | ✓ |
 | Alert detail toggle (`ShowThreatDetails`)            | ✓ |
 | 3 firewall profile toggles + 5 firewall block rules  | ✓ |

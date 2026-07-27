@@ -61,7 +61,7 @@ public sealed partial class DashboardForm
         };
         var version = new Label
         {
-            Text      = "v7.4.1 Dashboard",
+            Text      = "v7.4.2 Dashboard",
             ForeColor = Theme.TextDim,
             Font      = new Font("Segoe UI", 8),
             AutoSize  = false,
@@ -458,11 +458,15 @@ public sealed partial class DashboardForm
         _ctxKill.Click        += OnKillProcessClick;
         _ctxOpenLog.Click     += OnOpenLogClick;
         _ctxRegedit.Click     += OnRegeditClick;
+        _ctxInspect.Click     += OnInspectThreatClick;
+        _ctxRemediate.Click   += OnRemediateClick;
         _alertContextMenu.Items.AddRange(new ToolStripItem[]
         {
             _ctxCopyRow, _ctxCopyMessage,
             new ToolStripSeparator(),
-            _ctxIpLookup, _ctxBlockIp, _ctxKill, _ctxOpenLog, _ctxRegedit,
+            _ctxInspect, _ctxOpenLog, _ctxRegedit, _ctxRemediate,
+            new ToolStripSeparator(),
+            _ctxIpLookup, _ctxBlockIp, _ctxKill,
         });
         _alertContextMenu.Opening += OnAlertContextMenuOpening;
 
@@ -516,20 +520,28 @@ public sealed partial class DashboardForm
         _alertDetail.Controls.Add(_alertDetailBody);
 
         // Action buttons
-        StyleActionButton(_btnIpLookup,    "IP Lookup",     new Point(16, 420), 110);
+        StyleActionButton(_btnInspectThreat, "Inspect Finding", new Point(16, 382), 110);
+        _btnInspectThreat.Click += OnInspectThreatClick;
+        StyleActionButton(_btnIpLookup,    "IP Lookup",     new Point(16, 458), 110);
         _btnIpLookup.Click    += OnIpLookupClick;
-        StyleActionButton(_btnOpenLog,     "Show File",     new Point(132, 420), 110);
+        StyleActionButton(_btnOpenLog,     "Show File",     new Point(132, 382), 110);
         _btnOpenLog.Click     += OnOpenLogClick;
-        StyleActionButton(_btnRegedit,     "Open Regedit",  new Point(248, 420), 110);
+        StyleActionButton(_btnRegedit,     "Open Regedit",  new Point(132, 382), 110);
         _btnRegedit.Click     += OnRegeditClick;
-        _btnRestoreReg.Visible = false;
-        StyleActionButton(_btnBlockIp,     "Block IP (FW)", new Point(16, 460), 226);
+        StyleActionButton(_btnRemediate, "Remediate", new Point(16, 420), 226);
+        _btnRemediate.Click += OnRemediateClick;
+        StyleActionButton(_btnUndoRemediation, "Undo", new Point(248, 420), 226);
+        _btnUndoRemediation.Click += OnUndoRemediationClick;
+        StyleActionButton(_btnBlockIp,     "Block IP (FW)", new Point(248, 458), 226);
         _btnBlockIp.Click     += OnBlockIpClick;
-        StyleActionButton(_btnKillProcess, "Kill PID",      new Point(248, 460), 226);
+        StyleActionButton(_btnKillProcess, "Kill PID",      new Point(16, 496), 458);
         _btnKillProcess.Click += OnKillProcessClick;
+        _alertDetail.Controls.Add(_btnInspectThreat);
         _alertDetail.Controls.Add(_btnIpLookup);
         _alertDetail.Controls.Add(_btnOpenLog);
         _alertDetail.Controls.Add(_btnRegedit);
+        _alertDetail.Controls.Add(_btnRemediate);
+        _alertDetail.Controls.Add(_btnUndoRemediation);
         _alertDetail.Controls.Add(_btnBlockIp);
         _alertDetail.Controls.Add(_btnKillProcess);
 
@@ -552,20 +564,24 @@ public sealed partial class DashboardForm
             _alertDetailBody.Width = Math.Max(
                 120, _alertDetail.ClientSize.Width - 32);
             _alertDetailBody.Height = Math.Max(
-                160, _alertDetail.ClientSize.Height - 176);
+                120, _alertDetail.ClientSize.Height - 218);
 
             var half = Math.Max(
                 100, (_alertDetail.ClientSize.Width - 48) / 2);
             var right = 24 + half;
-            var row1 = _alertDetail.ClientSize.Height - 112;
-            var row2 = _alertDetail.ClientSize.Height - 74;
-            var row3 = _alertDetail.ClientSize.Height - 36;
-            _btnIpLookup.SetBounds(16, row1, half, 32);
+            var row1 = _alertDetail.ClientSize.Height - 154;
+            var row2 = _alertDetail.ClientSize.Height - 116;
+            var row3 = _alertDetail.ClientSize.Height - 78;
+            var row4 = _alertDetail.ClientSize.Height - 40;
+            _btnInspectThreat.SetBounds(16, row1, half, 32);
             _btnOpenLog.SetBounds(right, row1, half, 32);
-            _btnRegedit.SetBounds(16, row2, half, 32);
-            _btnBlockIp.SetBounds(right, row2, half, 32);
+            _btnRegedit.SetBounds(right, row1, half, 32);
+            _btnRemediate.SetBounds(16, row2, half, 32);
+            _btnUndoRemediation.SetBounds(right, row2, half, 32);
+            _btnIpLookup.SetBounds(16, row3, half, 32);
+            _btnBlockIp.SetBounds(right, row3, half, 32);
             _btnKillProcess.SetBounds(
-                16, row3, _alertDetail.ClientSize.Width - 32, 32);
+                16, row4, _alertDetail.ClientSize.Width - 32, 32);
 
             _alertsList.Columns[3].Width = Math.Max(
                 110, (_alertsList.ClientSize.Width - 325) / 2);

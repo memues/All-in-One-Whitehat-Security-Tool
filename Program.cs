@@ -77,12 +77,26 @@ internal static class Program
         bool install   = HasFlag(args, "--install",   "-Install");
         bool uninstall = HasFlag(args, "--uninstall", "-Uninstall");
         bool quiet     = HasFlag(args, "--quiet",     "-Quiet");
+        var registryRollback = GetOption(
+            args, "--apply-registry-rollback");
+        var disableAlertService = GetOption(
+            args, "--disable-alert-service");
+        var restoreAlertService = GetOption(
+            args, "--restore-alert-service");
         var initialTab = GetOption(args, "--tab");
         if (initialTab is not null
             && initialTab is not ("Status" or "Alerts" or "AI"
                 or "Settings" or "Logs" or "Console"))
             initialTab = null;
 
+        if (registryRollback is not null)
+            return RegistryRollbackService.ApplyEncoded(registryRollback);
+        if (disableAlertService is not null)
+            return ServiceRemediationService.ApplyDisableEncoded(
+                disableAlertService);
+        if (restoreAlertService is not null)
+            return ServiceRemediationService.ApplyRestoreEncoded(
+                restoreAlertService);
         if (install)   return RunInstall(quiet);
         if (uninstall) return RunUninstall(quiet);
 

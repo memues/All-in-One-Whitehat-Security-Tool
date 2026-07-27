@@ -12,7 +12,8 @@ public sealed class RegistryEngine : IMonitorEngine
 {
     public string Name => "Registry";
 
-    private readonly Dictionary<RegistrySlot, string?> _baseline = new();
+    private readonly Dictionary<RegistrySlot, RegistryValueSnapshot> _baseline =
+        new();
 
     private static readonly RegistryView[] WatchedViews =
         Environment.Is64BitOperatingSystem
@@ -67,24 +68,31 @@ public sealed class RegistryEngine : IMonitorEngine
         bool baselineMode,
         List<Alert>? alerts)
     {
-        Dictionary<string, string?> current;
+        Dictionary<string, RegistryValueSnapshot> current;
         try
         {
             using var root = RegistryKey.OpenBaseKey(hive, view);
             using var key = root.OpenSubKey(keyPath);
-            if (key is null) return;
 
-            current = new Dictionary<string, string?>(
+            current = new Dictionary<string, RegistryValueSnapshot>(
                 StringComparer.OrdinalIgnoreCase);
-            if (valueNameOrStar == "*")
+            if (key is null)
+            {
+                if (valueNameOrStar != "*")
+                    current[valueNameOrStar] =
+                        RegistryValueSnapshot.Missing;
+            }
+            else if (valueNameOrStar == "*")
             {
                 foreach (var name in key.GetValueNames())
-                    current[name] = key.GetValue(name)?.ToString();
+                    current[name] =
+                        RegistryValueSnapshot.Capture(key, name);
             }
             else
             {
                 current[valueNameOrStar] =
-                    key.GetValue(valueNameOrStar)?.ToString();
+                    RegistryValueSnapshot.Capture(
+                        key, valueNameOrStar);
             }
         }
         catch
@@ -104,15 +112,20 @@ public sealed class RegistryEngine : IMonitorEngine
             if (!_baseline.TryGetValue(slot, out var previous))
             {
                 _baseline[slot] = value;
-                if (value is not null)
-                    alerts?.Add(MakeAlert(slot, "added", value));
+                if (value.Exists)
+                    alerts?.Add(MakeAlert(
+                        slot, "added",
+                        RegistryValueSnapshot.Missing, value));
             }
-            else if (!string.Equals(previous, value, StringComparison.Ordinal))
+            else if (previous != value)
             {
                 _baseline[slot] = value;
-                var action = value is null ? "removed" : "changed";
-                alerts?.Add(MakeAlert(
-                    slot, action, $"{previous ?? "(missing)"} -> {value ?? "(missing)"}"));
+                var action = !previous.Exists && value.Exists
+                    ? "added"
+                    : value.Exists
+                        ? "changed"
+                        : "removed";
+                alerts?.Add(MakeAlert(slot, action, previous, value));
             }
         }
 
@@ -129,34 +142,52 @@ public sealed class RegistryEngine : IMonitorEngine
         foreach (var slot in removed)
         {
             var previous = _baseline[slot];
-            _baseline.Remove(slot);
+            if (!previous.Exists) continue;
+            _baseline[slot] = RegistryValueSnapshot.Missing;
             alerts?.Add(MakeAlert(
-                slot, "removed", previous ?? "(missing)"));
+                slot, "removed",
+                previous, RegistryValueSnapshot.Missing));
         }
     }
 
     private static Alert MakeAlert(
-        RegistrySlot slot, string action, string detail)
+        RegistrySlot slot,
+        string action,
+        RegistryValueSnapshot before,
+        RegistryValueSnapshot after)
     {
         var viewTag = slot.View == RegistryView.Registry32 ? " (32)" : "";
-        var root = slot.Hive switch
-        {
-            RegistryHive.LocalMachine => "HKEY_LOCAL_MACHINE",
-            RegistryHive.CurrentUser => "HKEY_CURRENT_USER",
-            _ => slot.Hive.ToString(),
-        };
+        var root = RegistryRollbackService.HiveName(slot.Hive);
         var registryPath = $"{root}\\{slot.KeyPath}";
         var displayPath = $"{root}{viewTag}\\{slot.KeyPath}";
+        var payload = new RegistryChangePayload(
+            slot.Hive,
+            slot.View,
+            slot.KeyPath,
+            slot.ValueName,
+            action,
+            before,
+            after);
         return new Alert(
             DateTime.Now,
             "Registry",
             $"REGISTRY {action.ToUpperInvariant()}",
-            $"{displayPath}!{slot.ValueName}: {detail}",
+            $"{displayPath}!{slot.ValueName}: " +
+            $"{before.ToDisplayText()} -> {after.ToDisplayText()}",
             AlertSeverity.Med,
             Extra: new Dictionary<string, string>
             {
                 ["RegistryPath"] = registryPath,
+                ["RegistryView"] =
+                    slot.View == RegistryView.Registry32
+                        ? "32"
+                        : "64",
                 ["ValueName"] = slot.ValueName,
+                ["Change"] = action,
+                ["Previous"] = before.ToDisplayText(),
+                ["Detected"] = after.ToDisplayText(),
+                [RegistryRollbackService.PayloadMetadataKey] =
+                    payload.Encode(),
             });
     }
 

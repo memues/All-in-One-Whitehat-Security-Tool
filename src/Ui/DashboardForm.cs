@@ -45,7 +45,9 @@ public sealed partial class DashboardForm : Form
     private readonly Button   _btnRegedit      = new();
     private readonly Button   _btnBlockIp      = new();
     private readonly Button   _btnKillProcess  = new();
-    private readonly Button   _btnRestoreReg   = new();
+    private readonly Button   _btnInspectThreat = new();
+    private readonly Button   _btnRemediate     = new();
+    private readonly Button   _btnUndoRemediation = new();
     private readonly TextBox  _alertSearch     = new();
     private readonly ComboBox _alertSeverityFilter = new();
     private readonly ComboBox _alertCategoryFilter = new();
@@ -79,6 +81,18 @@ public sealed partial class DashboardForm : Form
     private readonly Label    _aiStatusLabel = new();
     private ComboBox? _dnsProviderCombo;
     private Alert? _selectedAlert;
+    private readonly Dictionary<Alert, AlertActionState> _alertActionStates =
+        new(ReferenceEqualityComparer.Instance);
+
+    private sealed class AlertActionState
+    {
+        public string? Inspection { get; set; }
+        public string? Status { get; set; }
+        public bool Mitigated { get; set; }
+        public QuarantineRecord? Quarantine { get; set; }
+        public string? ServiceRestorePayload { get; set; }
+        public string? BlockedIp { get; set; }
+    }
 
     /// <summary>
     /// Status-page refresh timer. Stored in a field so FormClosed can stop
@@ -360,7 +374,11 @@ public sealed partial class DashboardForm : Form
         var item = new ListViewItem(a.Timestamp.ToString("HH:mm:ss"));
         item.SubItems.Add(a.Severity.ToString().ToUpperInvariant());
         item.SubItems.Add(a.Category);
-        item.SubItems.Add(a.Title);
+        item.SubItems.Add(
+            _alertActionStates.TryGetValue(a, out var actionState)
+                && actionState.Mitigated
+                ? $"[MITIGATED] {a.Title}"
+                : a.Title);
         item.SubItems.Add(a.Message);
         item.ForeColor = Theme.SeverityColor(a.Severity);
         item.Tag = a;
@@ -417,7 +435,7 @@ public sealed partial class DashboardForm : Form
             };
             if (dlg.ShowDialog() != DialogResult.OK) return;
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("Timestamp,Severity,Category,Title,Message,RemoteIp,RemotePort,ProcessName,ProcessId,Path");
+            sb.AppendLine("Timestamp,Severity,Category,Title,Message,RemoteIp,RemotePort,ProcessName,ProcessId,Path,ResponseStatus");
             foreach (var a in _allAlerts)
             {
                 if (!MatchesAlertFilters(a)) continue;
@@ -430,7 +448,11 @@ public sealed partial class DashboardForm : Form
                 sb.Append(CsvField(a.RemotePort?.ToString() ?? "")).Append(',');
                 sb.Append(CsvField(a.ProcessName ?? "")).Append(',');
                 sb.Append(CsvField(a.ProcessId?.ToString() ?? "")).Append(',');
-                sb.Append(CsvField(a.Path ?? "")).AppendLine();
+                sb.Append(CsvField(a.Path ?? "")).Append(',');
+                sb.Append(CsvField(
+                    _alertActionStates.TryGetValue(a, out var state)
+                        ? state.Status ?? ""
+                        : "")).AppendLine();
             }
             File.WriteAllText(dlg.FileName, sb.ToString());
         }
@@ -452,6 +474,7 @@ public sealed partial class DashboardForm : Form
         if (ans != DialogResult.Yes) return;
 
         _allAlerts.Clear();
+        _alertActionStates.Clear();
         _sink.Clear();
         _alertsList.BeginUpdate();
         try { _alertsList.Items.Clear(); }
@@ -471,11 +494,17 @@ public sealed partial class DashboardForm : Form
             return;
         }
         if (_alertContextMenu is null) { e.Cancel = true; return; }
-        _ctxBlockIp.Visible    = a.RemoteIp is not null;
+        _ctxBlockIp.Visible    = a.RemoteIp is not null
+            && GetAlertActionState(a).BlockedIp is null;
         _ctxIpLookup.Visible   = a.RemoteIp is not null;
         _ctxKill.Visible       = a.ProcessId is int pid && pid > 0;
-        _ctxOpenLog.Visible    = a.Path is not null && File.Exists(a.Path);
-        _ctxRegedit.Visible    = a.Category == "Registry";
+        var filePath = ThreatPath.Normalize(a.Path);
+        _ctxOpenLog.Visible    =
+            filePath is not null && File.Exists(filePath);
+        _ctxRegedit.Visible    = HasRegistryLocation(a);
+        _ctxInspect.Visible    = CanInspect(a);
+        _ctxRemediate.Visible  = CanRemediate(a);
+        _ctxRemediate.Text     = RemediationButtonText(a);
     }
 
     private void OnAlertCopyRowClick(object? sender, EventArgs e)
@@ -509,6 +538,8 @@ public sealed partial class DashboardForm : Form
     private ToolStripMenuItem _ctxKill        = new() { Text = "Kill process" };
     private ToolStripMenuItem _ctxOpenLog     = new() { Text = "Show file in Explorer" };
     private ToolStripMenuItem _ctxRegedit     = new() { Text = "Open in regedit" };
+    private ToolStripMenuItem _ctxInspect     = new() { Text = "Inspect finding" };
+    private ToolStripMenuItem _ctxRemediate   = new() { Text = "Remediate finding" };
 
     private void OnExportJsonClick(object? sender, EventArgs e)
     {
@@ -525,6 +556,10 @@ public sealed partial class DashboardForm : Form
                 a.Timestamp, Severity = a.Severity.ToString(), a.Category,
                 a.Title, a.Message, a.RemoteIp, a.RemotePort,
                 a.ProcessName, a.ProcessId, a.Path,
+                ResponseStatus =
+                    _alertActionStates.TryGetValue(a, out var state)
+                        ? state.Status
+                        : null,
             });
             var json = System.Text.Json.JsonSerializer.Serialize(rows,
                 JsonExportOptions);
@@ -609,21 +644,6 @@ public sealed partial class DashboardForm : Form
         }
     }
 
-    private void OnRestoreRegistryClick(object? sender, EventArgs e)
-    {
-        // Restoring the previous value requires the engine to capture it at
-        // baseline time, which Phase 1 of the C# port does not do. The
-        // button is in the UI for parity but the action is informational
-        // until the RegistryEngine is extended to capture old values.
-        if (_selectedAlert is null) return;
-        MessageBox.Show(
-            "Registry restore is not yet wired in the C# engine — open the entry\n" +
-            "in regedit and edit the value manually if needed.\n\n" +
-            $"Key: {_selectedAlert.Message}",
-            "Restore Registry",
-            MessageBoxButtons.OK, MessageBoxIcon.Information);
-    }
-
     private void OnAlertReceived(Alert alert)
     {
         if (IsDisposed) return;
@@ -642,7 +662,11 @@ public sealed partial class DashboardForm : Form
         // Master list keeps everything; the visible list is filter-driven.
         _allAlerts.Add(a);
         while (_allAlerts.Count > 5000)
+        {
+            var removed = _allAlerts[0];
             _allAlerts.RemoveAt(0);
+            _alertActionStates.Remove(removed);
+        }
 
         // Live insert into the visible list only if the current filters allow.
         if (MatchesAlertFilters(a))
@@ -676,7 +700,14 @@ public sealed partial class DashboardForm : Form
     {
         if (_alertsList.SelectedItems.Count == 0) { ClearAlertDetail(); return; }
         var item = _alertsList.SelectedItems[0];
-        if (item.Tag is Alert a) ShowAlertDetail(a);
+        if (item.Tag is Alert a)
+        {
+            ShowAlertDetail(a);
+            item.SubItems[3].Text =
+                GetAlertActionState(a).Mitigated
+                    ? $"[MITIGATED] {a.Title}"
+                    : a.Title;
+        }
     }
 
     private void ClearAlertDetail()
@@ -689,7 +720,9 @@ public sealed partial class DashboardForm : Form
         _btnIpLookup.Visible    = false;
         _btnOpenLog.Visible     = false;
         _btnRegedit.Visible     = false;
-        _btnRestoreReg.Visible  = false;
+        _btnInspectThreat.Visible = false;
+        _btnRemediate.Visible = false;
+        _btnUndoRemediation.Visible = false;
         _btnBlockIp.Visible     = false;
         _btnKillProcess.Visible = false;
     }
@@ -717,11 +750,14 @@ public sealed partial class DashboardForm : Form
             _btnBlockIp.Visible     = false;
             _btnOpenLog.Visible     = false;
             _btnRegedit.Visible     = false;
-            _btnRestoreReg.Visible  = false;
+            _btnInspectThreat.Visible = false;
+            _btnRemediate.Visible = false;
+            _btnUndoRemediation.Visible = false;
             _btnKillProcess.Visible = false;
             return;
         }
 
+        var actionState = GetAlertActionState(a);
         var body = new System.Text.StringBuilder();
         body.AppendLine($"Time:     {a.Timestamp:yyyy-MM-dd HH:mm:ss}");
         body.AppendLine($"Severity: {a.Severity}");
@@ -736,15 +772,44 @@ public sealed partial class DashboardForm : Form
             body.AppendLine($"Path:     {a.Path}");
         if (a.Extra is not null)
             foreach (var kv in a.Extra)
-                body.AppendLine($"{kv.Key,-10}{kv.Value}");
+                if (!kv.Key.StartsWith("_", StringComparison.Ordinal))
+                    body.AppendLine($"{kv.Key,-12}{kv.Value}");
+        if (!string.IsNullOrWhiteSpace(actionState.Inspection))
+        {
+            body.AppendLine();
+            body.AppendLine("--- Inspection ---");
+            body.AppendLine(actionState.Inspection);
+        }
+        if (!string.IsNullOrWhiteSpace(actionState.Status))
+        {
+            body.AppendLine();
+            body.AppendLine("--- Response status ---");
+            body.AppendLine(actionState.Status);
+        }
         _alertDetailBody.Text = body.ToString();
 
         // Action button visibility
         _btnIpLookup.Visible    = a.RemoteIp is not null;
-        _btnBlockIp.Visible     = a.RemoteIp is not null;
-        _btnOpenLog.Visible     = a.Path is not null && File.Exists(a.Path);
-        _btnRegedit.Visible     = a.Category == "Registry";
-        _btnRestoreReg.Visible  = false;
+        _btnBlockIp.Visible     = a.RemoteIp is not null
+            && actionState.BlockedIp is null;
+        var filePath = ThreatPath.Normalize(a.Path);
+        _btnOpenLog.Visible     =
+            filePath is not null && File.Exists(filePath);
+        _btnRegedit.Visible     = HasRegistryLocation(a);
+        _btnInspectThreat.Visible = CanInspect(a);
+        _btnRemediate.Visible = CanRemediate(a);
+        _btnRemediate.Text = RemediationButtonText(a);
+        _btnUndoRemediation.Visible =
+            actionState.Quarantine is not null
+            || actionState.ServiceRestorePayload is not null
+            || actionState.BlockedIp is not null;
+        _btnUndoRemediation.Text = actionState.Quarantine is not null
+            ? "Restore File"
+            : actionState.ServiceRestorePayload is not null
+                ? "Restore Service"
+                : actionState.BlockedIp is not null
+                    ? "Unblock IP"
+                    : "Undo";
         if (a.ProcessId is int pid && pid > 0)
         {
             _btnKillProcess.Visible = true;
@@ -775,7 +840,8 @@ public sealed partial class DashboardForm : Form
 
     private void OnOpenLogClick(object? sender, EventArgs e)
     {
-        if (_selectedAlert?.Path is not string p || !File.Exists(p)) return;
+        var p = ThreatPath.Normalize(_selectedAlert?.Path);
+        if (p is null || !File.Exists(p)) return;
         try
         {
             Process.Start(new ProcessStartInfo(
@@ -791,6 +857,7 @@ public sealed partial class DashboardForm : Form
     {
         try
         {
+            var use32BitView = false;
             if (_selectedAlert?.Extra is not null
                 && _selectedAlert.Extra.TryGetValue(
                     "RegistryPath", out var registryPath))
@@ -798,22 +865,253 @@ public sealed partial class DashboardForm : Form
                 using var key = Registry.CurrentUser.CreateSubKey(
                     @"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit");
                 key?.SetValue("LastKey", registryPath);
+                use32BitView =
+                    Environment.Is64BitOperatingSystem
+                    && _selectedAlert.Extra.TryGetValue(
+                        "RegistryView", out var view)
+                    && view == "32";
             }
-            Process.Start(new ProcessStartInfo("regedit.exe") { UseShellExecute = true });
+            var executable = use32BitView
+                ? Path.Combine(
+                    Environment.GetFolderPath(
+                        Environment.SpecialFolder.Windows),
+                    "SysWOW64", "regedit.exe")
+                : "regedit.exe";
+            Process.Start(new ProcessStartInfo(executable)
+            {
+                Arguments = "-m",
+                UseShellExecute = true,
+            });
         }
         catch (Exception ex) { _logger.Error($"Regedit: {ex.Message}"); }
     }
 
-    private void OnBlockIpClick(object? sender, EventArgs e)
+    private async void OnInspectThreatClick(object? sender, EventArgs e)
     {
-        if (_selectedAlert?.RemoteIp is not string ip) return;
+        var alert = _selectedAlert;
+        if (alert is null || !CanInspect(alert)) return;
+
+        SetAlertActionsEnabled(false);
+        try
+        {
+            var inspection = await Task.Run(
+                () => BuildInspectionText(alert));
+            var state = GetAlertActionState(alert);
+            state.Inspection = inspection;
+            state.Status = "Inspection completed. No system state was changed.";
+            RefreshAlertPresentation(alert);
+        }
+        catch (Exception ex)
+        {
+            GetAlertActionState(alert).Status =
+                $"Inspection failed: {ex.Message}";
+            RefreshAlertPresentation(alert);
+        }
+        finally
+        {
+            SetAlertActionsEnabled(true);
+        }
+    }
+
+    private async void OnRemediateClick(object? sender, EventArgs e)
+    {
+        var alert = _selectedAlert;
+        if (alert is null || !CanRemediate(alert)) return;
+        var state = GetAlertActionState(alert);
+
+        if (state.Quarantine is not null)
+        {
+            var answer = MessageBox.Show(
+                "Permanently delete the quarantined copy?\n\n" +
+                "This cannot be undone.",
+                "Permanent Delete - Confirm",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes) return;
+
+            SetAlertActionsEnabled(false);
+            var deletion = await Task.Run(
+                () => QuarantineManager.DeletePermanently(
+                    state.Quarantine));
+            state.Status = deletion.Message;
+            if (deletion.Success)
+                state.Quarantine = null;
+            SetAlertActionsEnabled(true);
+            RefreshAlertPresentation(alert);
+            return;
+        }
+
+        if (alert.Category == "Registry"
+            && RegistryRollbackService.CanRollback(alert))
+        {
+            var answer = MessageBox.Show(
+                "Roll back this registry change to the value captured " +
+                "immediately before the alert?\n\n" +
+                "The action will be cancelled if the value has changed " +
+                "again. HKLM changes require administrator approval.",
+                "Registry Rollback - Confirm",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes) return;
+
+            SetAlertActionsEnabled(false);
+            var result = await Task.Run(
+                () => RegistryRollbackService.Rollback(alert, _logger));
+            state.Status = result.Message;
+            state.Mitigated = result.Success;
+            SetAlertActionsEnabled(true);
+            RefreshAlertPresentation(alert);
+            return;
+        }
+
+        if (TryGetServiceName(alert, out var serviceName))
+        {
+            var noun = alert.Category is "Driver" or "BYOVD"
+                ? "driver service"
+                : "service";
+            var answer = MessageBox.Show(
+                $"Stop and disable {noun} '{serviceName}'?\n\n" +
+                "The original start mode will be retained for a Restore " +
+                "action. A loaded driver may remain active until restart.\n\n" +
+                "Administrator approval is required.",
+                "Service Deactivation - Confirm",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes) return;
+
+            SetAlertActionsEnabled(false);
+            var result = await Task.Run(
+                () => ServiceRemediationService.Disable(
+                    serviceName, _logger));
+            state.Status = result.Message;
+            if (result.Success)
+            {
+                state.Mitigated = true;
+                state.ServiceRestorePayload = result.RestorePayload;
+            }
+            SetAlertActionsEnabled(true);
+            RefreshAlertPresentation(alert);
+            return;
+        }
+
+        var path = ThreatPath.Normalize(alert.Path);
+        if (path is null || !File.Exists(path)) return;
+        var quarantineAnswer = MessageBox.Show(
+            $"Move this file to recoverable quarantine?\n\n{path}\n\n" +
+            "It can be restored or permanently deleted afterward.",
+            "Quarantine File - Confirm",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (quarantineAnswer != DialogResult.Yes) return;
+
+        SetAlertActionsEnabled(false);
+        var quarantine = await Task.Run(
+            () => QuarantineManager.Quarantine(path));
+        state.Status = quarantine.Message;
+        if (quarantine.Success)
+        {
+            state.Mitigated = true;
+            state.Quarantine = quarantine.Record;
+        }
+        SetAlertActionsEnabled(true);
+        RefreshAlertPresentation(alert);
+    }
+
+    private async void OnUndoRemediationClick(object? sender, EventArgs e)
+    {
+        var alert = _selectedAlert;
+        if (alert is null) return;
+        var state = GetAlertActionState(alert);
+
+        if (state.Quarantine is not null)
+        {
+            var answer = MessageBox.Show(
+                $"Restore the quarantined file?\n\n" +
+                $"{state.Quarantine.OriginalPath}",
+                "Restore File - Confirm",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes) return;
+            SetAlertActionsEnabled(false);
+            var result = await Task.Run(
+                () => QuarantineManager.Restore(state.Quarantine));
+            state.Status = result.Message;
+            if (result.Success)
+            {
+                state.Quarantine = null;
+                state.Mitigated = false;
+            }
+        }
+        else if (state.ServiceRestorePayload is not null)
+        {
+            var answer = MessageBox.Show(
+                "Restore the service's original start mode and running state?",
+                "Restore Service - Confirm",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes) return;
+            SetAlertActionsEnabled(false);
+            var result = await Task.Run(
+                () => ServiceRemediationService.Restore(
+                    state.ServiceRestorePayload, _logger));
+            state.Status = result.Message;
+            if (result.Success)
+            {
+                state.ServiceRestorePayload = null;
+                state.Mitigated = false;
+            }
+        }
+        else if (state.BlockedIp is not null)
+        {
+            var blockedIp = state.BlockedIp;
+            var answer = MessageBox.Show(
+                $"Remove Whitehat Security firewall rules for {blockedIp}?",
+                "Unblock IP - Confirm",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes) return;
+            SetAlertActionsEnabled(false);
+            var rc = await Task.Run(
+                () => ElevationHelper.UnblockIpAddress(
+                    blockedIp, _logger));
+            state.Status = rc == 0
+                ? $"IP {blockedIp} was unblocked."
+                : $"IP unblock failed (exit {rc}).";
+            if (rc == 0)
+            {
+                state.BlockedIp = null;
+                state.Mitigated = false;
+            }
+        }
+
+        SetAlertActionsEnabled(true);
+        RefreshAlertPresentation(alert);
+    }
+
+    private async void OnBlockIpClick(object? sender, EventArgs e)
+    {
+        var alert = _selectedAlert;
+        if (alert?.RemoteIp is not string ip) return;
         var result = MessageBox.Show(
             $"Block IP address {ip}?\n\nThis creates two Windows Firewall rules\n(WHS_Block_{ip}_In and _Out).\n\nA UAC prompt will appear.",
             "Block IP - Confirm",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
         if (result != DialogResult.Yes) return;
 
-        int rc = ElevationHelper.BlockIpAddress(ip, _logger);
+        SetAlertActionsEnabled(false);
+        int rc = await Task.Run(
+            () => ElevationHelper.BlockIpAddress(ip, _logger));
+        SetAlertActionsEnabled(true);
+        var state = GetAlertActionState(alert);
+        state.Status = rc == 0
+            ? $"IP {ip} was blocked by inbound and outbound firewall rules."
+            : $"IP block failed (exit {rc}).";
+        if (rc == 0)
+        {
+            state.Mitigated = true;
+            state.BlockedIp = ip;
+        }
+        RefreshAlertPresentation(alert);
         MessageBox.Show(
             rc == 0 ? $"IP {ip} blocked." : $"Failed (exit {rc}).",
             "Block IP",
@@ -847,16 +1145,210 @@ public sealed partial class DashboardForm : Form
                 return;
             }
             process.Kill();
+            MarkAlertMitigated(
+                _selectedAlert, "The detected process was terminated.");
             MessageBox.Show("Process killed.", "Kill Process", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch
         {
             int rc = ElevationHelper.KillProcessElevated(pid, _logger);
+            if (rc == 0)
+                MarkAlertMitigated(
+                    _selectedAlert, "The detected process was terminated.");
             MessageBox.Show(
                 rc == 0 ? "Process killed." : $"Failed (exit {rc}).",
                 "Kill Process", MessageBoxButtons.OK,
                 rc == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Error);
         }
+    }
+
+    private AlertActionState GetAlertActionState(Alert alert)
+    {
+        if (_alertActionStates.TryGetValue(alert, out var state))
+            return state;
+        state = new AlertActionState();
+        if (alert.Path is not null)
+            state.Quarantine = QuarantineManager.FindByOriginalPath(
+                alert.Path);
+        if (state.Quarantine is not null)
+        {
+            state.Mitigated = true;
+            state.Status =
+                $"File is in recoverable quarantine ({state.Quarantine.Id}).";
+        }
+        if (TryGetServiceName(alert, out var serviceName))
+        {
+            state.ServiceRestorePayload =
+                ServiceRemediationService.FindRestorePayload(
+                    serviceName);
+            if (state.ServiceRestorePayload is not null)
+            {
+                state.Mitigated = true;
+                state.Status =
+                    "The service is disabled and has a saved restore state.";
+            }
+        }
+        _alertActionStates[alert] = state;
+        return state;
+    }
+
+    private bool CanInspect(Alert alert)
+        => alert.Path is not null
+            || HasRegistryLocation(alert)
+            || TryGetServiceName(alert, out _)
+            || alert.ProcessId is > 0
+            || alert.RemoteIp is not null;
+
+    private bool CanRemediate(Alert alert)
+    {
+        var state = GetAlertActionState(alert);
+        if (state.Quarantine is not null) return true;
+        if (state.Mitigated) return false;
+        if (alert.Category == "Registry")
+            return RegistryRollbackService.CanRollback(alert);
+        if (TryGetServiceName(alert, out _)
+            && !alert.Title.Contains(
+                "REMOVED", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var path = ThreatPath.Normalize(alert.Path);
+        return path is not null
+            && File.Exists(path)
+            && !ThreatPath.IsProtectedSystemPath(path);
+    }
+
+    private string RemediationButtonText(Alert alert)
+    {
+        var state = GetAlertActionState(alert);
+        if (state.Quarantine is not null)
+            return "Delete Permanently";
+        if (alert.Category == "Registry")
+            return "Undo Registry Change";
+        if (TryGetServiceName(alert, out _))
+            return alert.Category is "Driver" or "BYOVD"
+                ? "Disable Driver"
+                : "Disable Service";
+        return "Quarantine File";
+    }
+
+    private static bool TryGetServiceName(
+        Alert alert, out string serviceName)
+    {
+        serviceName = "";
+        if (alert.Extra is null
+            || !alert.Extra.TryGetValue(
+                "ServiceName", out var found)
+            || !ServiceStatePayload.IsValidServiceName(found))
+            return false;
+        serviceName = found;
+        return true;
+    }
+
+    private static bool HasRegistryLocation(Alert alert)
+        => alert.Extra is not null
+            && alert.Extra.TryGetValue(
+                "RegistryPath", out var registryPath)
+            && !string.IsNullOrWhiteSpace(registryPath);
+
+    private static string BuildInspectionText(Alert alert)
+    {
+        var sections = new List<string>();
+        var path = ThreatPath.Normalize(alert.Path);
+        if (path is not null)
+            sections.Add(FileInvestigator.Inspect(path).ToDisplayText());
+
+        if (HasRegistryLocation(alert))
+        {
+            if (RegistryRollbackService.CanRollback(alert))
+            {
+                sections.Add(
+                    RegistryRollbackService.Inspect(alert));
+            }
+            else
+            {
+                var registryPath =
+                    alert.Extra!["RegistryPath"];
+                alert.Extra.TryGetValue(
+                    "ValueName", out var valueName);
+                sections.Add(
+                    $"Registry key: {registryPath}{Environment.NewLine}" +
+                    $"Value:        {valueName ?? "(not specified)"}");
+            }
+        }
+
+        if (TryGetServiceName(alert, out var serviceName))
+            sections.Add(ServiceRemediationService.Inspect(serviceName));
+
+        if (alert.ProcessId is int pid && pid > 0)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(pid);
+                var sameProcess = string.IsNullOrWhiteSpace(alert.ProcessName)
+                    || string.Equals(
+                        process.ProcessName,
+                        alert.ProcessName,
+                        StringComparison.OrdinalIgnoreCase);
+                sections.Add(
+                    $"Process: {process.ProcessName} (PID {pid}){Environment.NewLine}" +
+                    $"State:   {(sameProcess ? "Running" : "PID reused by a different process")}");
+            }
+            catch
+            {
+                sections.Add(
+                    $"Process: PID {pid}{Environment.NewLine}State:   Not running");
+            }
+        }
+
+        if (alert.RemoteIp is not null)
+            sections.Add(
+                $"Remote IP: {alert.RemoteIp}{Environment.NewLine}" +
+                $"Port:      {alert.RemotePort?.ToString() ?? "(unknown)"}");
+
+        return sections.Count == 0
+            ? "No category-specific inspection data is available."
+            : string.Join(
+                Environment.NewLine + Environment.NewLine,
+                sections);
+    }
+
+    private void SetAlertActionsEnabled(bool enabled)
+    {
+        _btnInspectThreat.Enabled = enabled;
+        _btnRemediate.Enabled = enabled;
+        _btnUndoRemediation.Enabled = enabled;
+        _btnIpLookup.Enabled = enabled;
+        _btnOpenLog.Enabled = enabled;
+        _btnRegedit.Enabled = enabled;
+        _btnBlockIp.Enabled = enabled;
+        _btnKillProcess.Enabled = enabled;
+        if (!enabled)
+            _btnRemediate.Text = "Working...";
+    }
+
+    private void MarkAlertMitigated(Alert? alert, string status)
+    {
+        if (alert is null) return;
+        var state = GetAlertActionState(alert);
+        state.Mitigated = true;
+        state.Status = status;
+        RefreshAlertPresentation(alert);
+    }
+
+    private void RefreshAlertPresentation(Alert alert)
+    {
+        foreach (ListViewItem item in _alertsList.Items)
+        {
+            if (ReferenceEquals(item.Tag, alert))
+            {
+                item.SubItems[3].Text =
+                    GetAlertActionState(alert).Mitigated
+                        ? $"[MITIGATED] {alert.Title}"
+                        : alert.Title;
+                break;
+            }
+        }
+        if (ReferenceEquals(_selectedAlert, alert))
+            ShowAlertDetail(alert);
     }
 
     // -----------------------------------------------------------------------

@@ -92,7 +92,9 @@ public sealed class ByovdEngine : IMonitorEngine, ICurrentStateScanner
                 try
                 {
                     var path = mo["PathName"]?.ToString() ?? "";
-                    var fileName = Path.GetFileName(path);
+                    var normalizedPath = ThreatPath.Normalize(path);
+                    var fileName = Path.GetFileName(
+                        normalizedPath ?? path);
                     if (string.IsNullOrEmpty(fileName)) continue;
 
                     if (Catalogue.Contains(fileName))
@@ -103,7 +105,12 @@ public sealed class ByovdEngine : IMonitorEngine, ICurrentStateScanner
                             Title:     "POTENTIALLY VULNERABLE DRIVER LOADED",
                             Message:   $"{fileName} matches a known-vulnerable driver filename; verify its hash and version ({path})",
                             Severity:  AlertSeverity.High,
-                            Path:      path));
+                            Path:      normalizedPath,
+                            Extra:     new Dictionary<string, string>
+                            {
+                                ["ServiceName"] =
+                                    mo["Name"]?.ToString() ?? "",
+                            }));
                     }
                 }
                 finally

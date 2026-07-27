@@ -30,12 +30,20 @@ public sealed class ServiceEngine : IMonitorEngine
         {
             if (_baseline.Add(name))
             {
+                var path = ReadServicePath(name);
                 yield return new Alert(
                     Timestamp: DateTime.Now,
                     Category:  "Service",
                     Title:     "NEW SERVICE",
-                    Message:   name,
-                    Severity:  AlertSeverity.High);
+                    Message:   string.IsNullOrWhiteSpace(path)
+                        ? name
+                        : $"{name} ({path})",
+                    Severity:  AlertSeverity.High,
+                    Path:      ThreatPath.Normalize(path),
+                    Extra:     new Dictionary<string, string>
+                    {
+                        ["ServiceName"] = name,
+                    });
             }
         }
     }
@@ -54,5 +62,19 @@ public sealed class ServiceEngine : IMonitorEngine
             foreach (var service in all)
                 service.Dispose();
         }
+    }
+
+    private static string? ReadServicePath(string name)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                $@"SYSTEM\CurrentControlSet\Services\{name}");
+            return key?.GetValue(
+                "ImagePath", null,
+                Microsoft.Win32.RegistryValueOptions
+                    .DoNotExpandEnvironmentNames)?.ToString();
+        }
+        catch { return null; }
     }
 }

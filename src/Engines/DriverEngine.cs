@@ -33,11 +33,17 @@ public sealed class DriverEngine : IMonitorEngine
 
         foreach (var (name, path) in current)
         {
+            var normalizedPath = ThreatPath.Normalize(path);
+            var metadata = new Dictionary<string, string>
+            {
+                ["ServiceName"] = name,
+            };
             if (!_baseline.TryGetValue(name, out var previous))
             {
                 yield return new Alert(
                     DateTime.Now, "Driver", "NEW DRIVER",
-                    $"{name} ({path})", AlertSeverity.High, Path: path);
+                    $"{name} ({path})", AlertSeverity.High,
+                    Path: normalizedPath, Extra: metadata);
             }
             else if (!string.Equals(
                          previous, path, StringComparison.OrdinalIgnoreCase))
@@ -45,7 +51,8 @@ public sealed class DriverEngine : IMonitorEngine
                 yield return new Alert(
                     DateTime.Now, "Driver", "DRIVER PATH CHANGED",
                     $"{name}: {previous} -> {path}",
-                    AlertSeverity.High, Path: path);
+                    AlertSeverity.High,
+                    Path: normalizedPath, Extra: metadata);
             }
 
             _baseline[name] = path;
@@ -60,7 +67,11 @@ public sealed class DriverEngine : IMonitorEngine
         {
             yield return new Alert(
                 DateTime.Now, "Driver", "DRIVER REMOVED",
-                name, AlertSeverity.Med);
+                name, AlertSeverity.Med,
+                Extra: new Dictionary<string, string>
+                {
+                    ["ServiceName"] = name,
+                });
             _baseline.Remove(name);
         }
     }

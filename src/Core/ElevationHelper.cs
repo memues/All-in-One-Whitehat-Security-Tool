@@ -18,6 +18,51 @@ namespace WhitehatSecurity.Core;
 
 public static class ElevationHelper
 {
+    /// <summary>
+    /// Re-launches this signed application with a narrowly-scoped internal
+    /// command. Payloads used by remediation commands are Base64 and command
+    /// names are fixed by the caller, so no shell is involved.
+    /// </summary>
+    public static int RunSelfElevated(
+        string arguments,
+        Logger? logger = null,
+        int timeoutMilliseconds = 30_000)
+    {
+        if (string.IsNullOrWhiteSpace(arguments)
+            || arguments.Contains('\r')
+            || arguments.Contains('\n'))
+            return -5;
+
+        var self = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(self) || !File.Exists(self))
+            return -1;
+
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = self,
+                Arguments = arguments,
+                Verb = "runas",
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+            if (process is null) return -1;
+            if (!process.WaitForExit(timeoutMilliseconds))
+            {
+                logger?.Warn("Elevated remediation timed out.");
+                try { process.Kill(); } catch { }
+                return -2;
+            }
+            return process.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            logger?.Warn($"Elevated remediation was cancelled or failed: {ex.Message}");
+            return -3;
+        }
+    }
+
     internal static int CleanupManagedChanges(Logger? logger = null)
     {
         const string script = @"
@@ -229,6 +274,23 @@ if (-not (Get-NetFirewallRule -DisplayName $ruleIn  -ErrorAction SilentlyContinu
 if (-not (Get-NetFirewallRule -DisplayName $ruleOut -ErrorAction SilentlyContinue)) {{
     New-NetFirewallRule -DisplayName $ruleOut -Direction Outbound -Action Block -RemoteAddress $ip -Profile Any | Out-Null
 }}
+";
+        return RunElevated(script, logger);
+    }
+
+    public static int UnblockIpAddress(string ip, Logger? logger = null)
+    {
+        if (!IPAddress.TryParse(ip, out var parsed))
+            return -5;
+        var safeIp = parsed.ToString();
+        var script = $@"
+$ip = '{safeIp}'
+$ruleIn  = ""WHS_Block_$ip" + @"_In""
+$ruleOut = ""WHS_Block_$ip" + @"_Out""
+Get-NetFirewallRule -DisplayName $ruleIn -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction Stop
+Get-NetFirewallRule -DisplayName $ruleOut -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction Stop
 ";
         return RunElevated(script, logger);
     }

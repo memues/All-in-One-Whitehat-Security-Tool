@@ -23,7 +23,7 @@ namespace WhitehatSecurity.Core;
 public static class Installer
 {
     public const string ProductName    = "Whitehat Security";
-    public const string ProductVersion = "7.4.1";
+    public const string ProductVersion = "7.4.2";
     public const string Publisher      = "Whitehat Security";
     public const string AppId          = "WhitehatSecurity";
 

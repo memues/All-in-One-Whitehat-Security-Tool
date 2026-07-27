@@ -44,6 +44,8 @@ public static class Paths
     public static string ConfigPath  => Path.Combine(DataDir, "notification_config.json");
     public static string LogsDir     => Path.Combine(DataDir, "Logs");
     public static string BaselineDir => Path.Combine(DataDir, "Baselines");
+    public static string QuarantineDir => Path.Combine(DataDir, "Quarantine");
+    public static string RemediationDir => Path.Combine(DataDir, "Remediation");
 
     private static string ResolveDataDir()
     {
