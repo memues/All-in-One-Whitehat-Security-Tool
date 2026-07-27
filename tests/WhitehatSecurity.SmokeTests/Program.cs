@@ -892,6 +892,54 @@ Run("Alerts response controls fit the minimum dashboard size", () =>
             Equal(
                 true,
                 GetPrivateField<Button>(form, "_btnCopyMessage").Visible);
+
+            // Visible is not the same as on screen. A button with no size,
+            // or one sitting in a strip that collapsed to zero height, is
+            // invisible to the user while every Visible flag reads true.
+            var actions = GetPrivateField<FlowLayoutPanel>(
+                form, "_alertActions");
+            if (actions.Height <= 0 || actions.Width <= 0)
+                throw new InvalidOperationException(
+                    $"Alert action strip has no size: {actions.Bounds}.");
+            AssertInside(detail, actions);
+
+            var shown = actions.Controls.Cast<Control>()
+                .Where(c => c.Visible)
+                .ToList();
+            if (shown.Count == 0)
+                throw new InvalidOperationException(
+                    "No alert action button is visible.");
+            foreach (var button in shown)
+            {
+                if (button.Width <= 0 || button.Height <= 0)
+                    throw new InvalidOperationException(
+                        $"{button.Text} has no size: {button.Bounds}.");
+                AssertInside(actions, button);
+            }
+
+            // With "Detailed Threat Info" off — the default for a fresh
+            // install — every response action is hidden. The alert must then
+            // offer a way to switch it on, or the panel just looks broken.
+            config.ShowThreatDetails = false;
+            InvokePrivate(form, "ShowAlertDetail", fileAlert);
+            Application.DoEvents();
+            var enable = GetPrivateField<Button>(form, "_btnEnableDetails");
+            Equal(true, enable.Visible);
+            Equal(
+                false,
+                GetPrivateField<Button>(form, "_btnInspectThreat").Visible);
+            if (enable.Width <= 0 || enable.Height <= 0)
+                throw new InvalidOperationException(
+                    $"Enable button has no size: {enable.Bounds}.");
+            AssertInside(actions, enable);
+
+            enable.PerformClick();
+            Application.DoEvents();
+            Equal(true, config.ShowThreatDetails);
+            Equal(false, enable.Visible);
+            Equal(
+                true,
+                GetPrivateField<Button>(form, "_btnInspectThreat").Visible);
         }
         finally
         {

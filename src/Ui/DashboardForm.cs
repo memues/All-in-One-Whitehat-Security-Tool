@@ -55,6 +55,10 @@ public sealed partial class DashboardForm : Form
     private readonly FlowLayoutPanel _alertActions = new();
     private readonly Button   _btnCopyRow      = new();
     private readonly Button   _btnCopyMessage  = new();
+    // "Detailed Threat Info" is off by default, and it hides every response
+    // action. Without a way in from here the buttons simply look broken:
+    // the user sees an alert, no actions, and no reason why.
+    private readonly Button   _btnEnableDetails = new();
     private readonly TextBox  _alertSearch     = new();
     private readonly ComboBox _alertSeverityFilter = new();
     private readonly ComboBox _alertCategoryFilter = new();
@@ -736,6 +740,21 @@ public sealed partial class DashboardForm : Form
         _btnKillProcess.Visible = false;
         _btnCopyRow.Visible     = false;
         _btnCopyMessage.Visible = false;
+        _btnEnableDetails.Visible = false;
+    }
+
+    /// <summary>
+    /// Turns on "Detailed Threat Info" from the alert itself and re-renders,
+    /// so the response actions appear immediately. Reaching them used to
+    /// mean finding an unrelated-sounding display toggle on the Settings
+    /// page, with nothing on the alert saying so.
+    /// </summary>
+    private void OnEnableThreatDetailsClick(object? sender, EventArgs e)
+    {
+        _config.ShowThreatDetails = true;
+        SaveConfigSafe();
+        ApplyConfigToSettingsCheckboxes();
+        if (_selectedAlert is not null) ShowAlertDetail(_selectedAlert);
     }
 
     private void ShowAlertDetail(Alert a)
@@ -752,6 +771,7 @@ public sealed partial class DashboardForm : Form
         // so these stay available even with detailed threat info switched off.
         _btnCopyRow.Visible     = true;
         _btnCopyMessage.Visible = true;
+        _btnEnableDetails.Visible = !showFull;
 
         if (!showFull)
         {
@@ -760,7 +780,8 @@ public sealed partial class DashboardForm : Form
                 $"Category: {a.Category}{Environment.NewLine}{Environment.NewLine}" +
                 a.Message +
                 $"{Environment.NewLine}{Environment.NewLine}" +
-                "Enable “Detailed Threat Info” in Settings to show sensitive paths, process data, and response actions.";
+                "Response actions are hidden while “Detailed Threat Info” is off. " +
+                "Use the button below to turn it on — it also reveals file paths and process data.";
             _btnIpLookup.Visible    = false;
             _btnBlockIp.Visible     = false;
             _btnOpenLog.Visible     = false;

@@ -555,9 +555,13 @@ public sealed partial class DashboardForm
         _btnCopyRow.Click += OnAlertCopyRowClick;
         StyleActionButton(_btnCopyMessage, "Copy Message");
         _btnCopyMessage.Click += OnAlertCopyMessageClick;
+        StyleActionButton(_btnEnableDetails, "Enable Response Actions");
+        _btnEnableDetails.BackColor = Theme.AccentDim;
+        _btnEnableDetails.Click += OnEnableThreatDetailsClick;
 
         _alertActions.Controls.AddRange(new Control[]
         {
+            _btnEnableDetails,
             _btnInspectThreat, _btnOpenLog, _btnRegedit,
             _btnRemediate, _btnUndoRemediation,
             _btnIpLookup, _btnBlockIp, _btnKillProcess,
