@@ -2,6 +2,7 @@
 bin/
 obj/
 publish/
+artifacts/
 
 # Visual Studio / Rider workspace
 .vs/
