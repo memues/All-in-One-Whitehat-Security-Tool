@@ -780,7 +780,6 @@ Run("Alerts response controls fit the minimum dashboard size", () =>
         File.WriteAllText(filePath, "ui-layout-test");
         var logger = new Logger(directory);
         var config = NotifyConfig.Defaults();
-        config.ShowThreatDetails = true;
         var sink = new DashboardSink();
         var console = new ConsoleSink();
         using var host = new MonitorHost(
@@ -917,29 +916,34 @@ Run("Alerts response controls fit the minimum dashboard size", () =>
                 AssertInside(actions, button);
             }
 
-            // With "Detailed Threat Info" off — the default for a fresh
-            // install — every response action is hidden. The alert must then
-            // offer a way to switch it on, or the panel just looks broken.
-            config.ShowThreatDetails = false;
-            InvokePrivate(form, "ShowAlertDetail", fileAlert);
-            Application.DoEvents();
-            var enable = GetPrivateField<Button>(form, "_btnEnableDetails");
-            Equal(true, enable.Visible);
-            Equal(
-                false,
-                GetPrivateField<Button>(form, "_btnInspectThreat").Visible);
-            if (enable.Width <= 0 || enable.Height <= 0)
-                throw new InvalidOperationException(
-                    $"Enable button has no size: {enable.Bounds}.");
-            AssertInside(actions, enable);
-
-            enable.PerformClick();
-            Application.DoEvents();
-            Equal(true, config.ShowThreatDetails);
-            Equal(false, enable.Visible);
-            Equal(
-                true,
-                GetPrivateField<Button>(form, "_btnInspectThreat").Visible);
+            // Response actions are unconditional now. A default-configured
+            // install used to answer every alert with no buttons at all,
+            // because the toggle that gated them shipped switched off.
+            var fresh = NotifyConfig.Defaults();
+            using var freshForm = new DashboardForm(
+                fresh, logger, sink, console,
+                Path.Combine(directory, "fresh.json"), host)
+            {
+                Size = new System.Drawing.Size(960, 600),
+                ShowInTaskbar = false,
+                Opacity = 0.01,
+            };
+            try
+            {
+                InvokePrivate(freshForm, "ShowPage", "Alerts");
+                freshForm.Show();
+                InvokePrivate(freshForm, "ShowAlertDetail", fileAlert);
+                Application.DoEvents();
+                Equal(
+                    true,
+                    GetPrivateField<Button>(
+                        freshForm, "_btnInspectThreat").Visible);
+                Equal(
+                    true,
+                    GetPrivateField<Button>(
+                        freshForm, "_btnOpenLog").Visible);
+            }
+            finally { freshForm.Close(); }
         }
         finally
         {
@@ -972,8 +976,7 @@ Run("Every page lays out cleanly at every window size", () =>
         {
             var logger = new Logger(directory);
             var config = NotifyConfig.Defaults();
-            config.ShowThreatDetails = true;
-            var sink = new DashboardSink();
+                var sink = new DashboardSink();
             var console = new ConsoleSink();
             using var host = new MonitorHost(
                 config, logger, TimeSpan.FromMinutes(10));

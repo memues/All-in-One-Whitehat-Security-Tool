@@ -80,8 +80,10 @@ public sealed class NotifyConfig
 
     // ---------------- Display / behavior (3) ----------------
 
-    [JsonPropertyName("ShowThreatDetails")]
-    public bool ShowThreatDetails { get; set; }
+    // ShowThreatDetails was removed in v7.4.12. It defaulted to off and hid
+    // every response action, so a fresh install answered each alert with no
+    // buttons and no explanation. Full detail is now simply how an alert is
+    // presented. The key is ignored if it is still present in an old file.
 
     [JsonPropertyName("EnableToastNotifications")]
     public bool EnableToastNotifications { get; set; }
@@ -143,7 +145,6 @@ public sealed class NotifyConfig
         HiddenProcess            = true,
         Memory                   = true,
         BYOVD                    = true,
-        ShowThreatDetails        = false,
         // Toasts are opt-in: a fresh install should be quiet. The user can
         // enable them from Settings whenever they want the popups back.
         EnableToastNotifications = false,

@@ -555,13 +555,8 @@ public sealed partial class DashboardForm
         _btnCopyRow.Click += OnAlertCopyRowClick;
         StyleActionButton(_btnCopyMessage, "Copy Message");
         _btnCopyMessage.Click += OnAlertCopyMessageClick;
-        StyleActionButton(_btnEnableDetails, "Enable Response Actions");
-        _btnEnableDetails.BackColor = Theme.AccentDim;
-        _btnEnableDetails.Click += OnEnableThreatDetailsClick;
-
         _alertActions.Controls.AddRange(new Control[]
         {
-            _btnEnableDetails,
             _btnInspectThreat, _btnOpenLog, _btnRegedit,
             _btnRemediate, _btnUndoRemediation,
             _btnIpLookup, _btnBlockIp, _btnKillProcess,
@@ -853,7 +848,6 @@ public sealed partial class DashboardForm
 
         // -------- Display section --------
         y = AddSectionHeader(page, "Display & Behavior", y + 8);
-        y = AddSettingCheckbox(page, "ShowThreatDetails",        "Detailed Threat Info",          "Show full details and severity levels for threats", _config.ShowThreatDetails,        y);
         y = AddSettingCheckbox(page, "EnableToastNotifications", "Enable Toast Notifications",    "Show Windows toast/balloon notifications for alerts", _config.EnableToastNotifications, y);
         y = AddSettingCheckbox(page, "BeepOnAlert",              "Beep on Alert",                 "Play system beep when alerts occur", _config.BeepOnAlert, y);
 

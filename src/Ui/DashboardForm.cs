@@ -55,10 +55,6 @@ public sealed partial class DashboardForm : Form
     private readonly FlowLayoutPanel _alertActions = new();
     private readonly Button   _btnCopyRow      = new();
     private readonly Button   _btnCopyMessage  = new();
-    // "Detailed Threat Info" is off by default, and it hides every response
-    // action. Without a way in from here the buttons simply look broken:
-    // the user sees an alert, no actions, and no reason why.
-    private readonly Button   _btnEnableDetails = new();
     private readonly TextBox  _alertSearch     = new();
     private readonly ComboBox _alertSeverityFilter = new();
     private readonly ComboBox _alertCategoryFilter = new();
@@ -740,21 +736,6 @@ public sealed partial class DashboardForm : Form
         _btnKillProcess.Visible = false;
         _btnCopyRow.Visible     = false;
         _btnCopyMessage.Visible = false;
-        _btnEnableDetails.Visible = false;
-    }
-
-    /// <summary>
-    /// Turns on "Detailed Threat Info" from the alert itself and re-renders,
-    /// so the response actions appear immediately. Reaching them used to
-    /// mean finding an unrelated-sounding display toggle on the Settings
-    /// page, with nothing on the alert saying so.
-    /// </summary>
-    private void OnEnableThreatDetailsClick(object? sender, EventArgs e)
-    {
-        _config.ShowThreatDetails = true;
-        SaveConfigSafe();
-        ApplyConfigToSettingsCheckboxes();
-        if (_selectedAlert is not null) ShowAlertDetail(_selectedAlert);
     }
 
     private void ShowAlertDetail(Alert a)
@@ -765,33 +746,13 @@ public sealed partial class DashboardForm : Form
             ? Theme.SevCrit
             : Theme.AccentBlue;
 
-        bool showFull = _config.ShowThreatDetails;
+        // Full detail and the response actions are simply how an alert is
+        // shown. They used to sit behind a "Detailed Threat Info" toggle
+        // that defaulted to off, so a fresh install answered every alert
+        // with no actions and no explanation.
         _alertDetailBody.Visible = true;
-        // Copying an alert exposes nothing the list is not already showing,
-        // so these stay available even with detailed threat info switched off.
         _btnCopyRow.Visible     = true;
         _btnCopyMessage.Visible = true;
-        _btnEnableDetails.Visible = !showFull;
-
-        if (!showFull)
-        {
-            _alertDetailBody.Text =
-                $"Time:     {a.Timestamp:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
-                $"Category: {a.Category}{Environment.NewLine}{Environment.NewLine}" +
-                a.Message +
-                $"{Environment.NewLine}{Environment.NewLine}" +
-                "Response actions are hidden while “Detailed Threat Info” is off. " +
-                "Use the button below to turn it on — it also reveals file paths and process data.";
-            _btnIpLookup.Visible    = false;
-            _btnBlockIp.Visible     = false;
-            _btnOpenLog.Visible     = false;
-            _btnRegedit.Visible     = false;
-            _btnInspectThreat.Visible = false;
-            _btnRemediate.Visible = false;
-            _btnUndoRemediation.Visible = false;
-            _btnKillProcess.Visible = false;
-            return;
-        }
 
         var actionState = GetAlertActionState(a);
         var body = new System.Text.StringBuilder();
@@ -1415,7 +1376,6 @@ public sealed partial class DashboardForm : Form
             case "Memory":     _config.Memory     = cb.Checked; break;
             case "BYOVD":      _config.BYOVD      = cb.Checked; break;
 
-            case "ShowThreatDetails":        _config.ShowThreatDetails        = cb.Checked; break;
             case "EnableToastNotifications": _config.EnableToastNotifications = cb.Checked; break;
             case "BeepOnAlert":              _config.BeepOnAlert              = cb.Checked; break;
 
@@ -1784,7 +1744,6 @@ public sealed partial class DashboardForm : Form
         dst.HiddenProcess            = src.HiddenProcess;
         dst.Memory                   = src.Memory;
         dst.BYOVD                    = src.BYOVD;
-        dst.ShowThreatDetails        = src.ShowThreatDetails;
         dst.EnableToastNotifications = src.EnableToastNotifications;
         dst.BeepOnAlert              = src.BeepOnAlert;
     }
@@ -1816,7 +1775,6 @@ public sealed partial class DashboardForm : Form
                 "HiddenProcess"            => _config.HiddenProcess,
                 "Memory"                   => _config.Memory,
                 "BYOVD"                    => _config.BYOVD,
-                "ShowThreatDetails"        => _config.ShowThreatDetails,
                 "EnableToastNotifications" => _config.EnableToastNotifications,
                 "BeepOnAlert"              => _config.BeepOnAlert,
                 "FW_DomainProfile"         => _config.FW_DomainProfile,
